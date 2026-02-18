@@ -42,7 +42,7 @@ readonly REGISTRY_DIR="$HOME/.config/shipyard"
 readonly REGISTRY_FILE="$REGISTRY_DIR/projects.conf"
 readonly LOCK_FILE="$REGISTRY_DIR/projects.conf.lock"
 readonly LOCK_TIMEOUT=10
-readonly COMPOSE_FILE="${1:-docker-compose.yml}"
+readonly COMPOSE_FILE="docker-compose.yml"
 readonly ENV_FILE=".env"
 
 # Valet/Herd configuration
