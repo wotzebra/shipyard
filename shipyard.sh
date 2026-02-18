@@ -116,15 +116,21 @@ show_help() {
 Shipyard v$VERSION - Laravel Sail Project Setup
 
 Usage:
+  shipyard init         Initialize a Laravel Sail project
   shipyard [options]
 
-Options:
-  --version, -v     Show version
-  --update          Update to latest version
-  --help, -h        Show this help
+Commands:
+  init                  Set up the Laravel Sail project in current directory
+                        (automatic port assignment, domain configuration, etc.)
 
-When run without options, Shipyard will set up the Laravel Sail project
-in the current directory with automatic port assignment and domain configuration.
+Options:
+  --version, -v         Show version
+  --update              Update to latest version
+  --help, -h            Show this help
+
+Examples:
+  shipyard init         # Set up project in current directory
+  shipyard --update     # Update Shipyard to latest version
 
 Features:
   • Automatic port assignment with conflict detection
@@ -297,6 +303,10 @@ check_for_updates() {
 
 parse_arguments() {
     case "${1:-}" in
+        init)
+            # Run main setup
+            return 0
+            ;;
         --version|-v)
             show_version
             exit 0
@@ -310,11 +320,12 @@ parse_arguments() {
             exit 0
             ;;
         "")
-            # No arguments, proceed with normal execution
-            return 0
+            # No arguments, show help
+            show_help
+            exit 0
             ;;
         *)
-            log_error "Unknown option: $1"
+            log_error "Unknown command or option: $1"
             echo ""
             show_help
             exit 1

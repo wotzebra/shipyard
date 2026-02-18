@@ -53,7 +53,7 @@ source ~/.bashrc  # or ~/.zshrc depending on your shell
 Navigate to your Laravel Sail project directory and run:
 
 ```bash
-shipyard
+shipyard init
 ```
 
 ### What Happens
@@ -66,10 +66,10 @@ The wizard will guide you through:
 4. **SSL Certificates** (If domain registered) - Automatic certificate setup
 5. **Post-Setup Commands** (Optional) - Start containers and run Laravel setup
 
-### Command Options
+### Commands
 
 ```bash
-shipyard           # Run setup wizard
+shipyard init      # Initialize project setup
 shipyard --version # Show version
 shipyard --update  # Update to latest version
 shipyard --help    # Show help

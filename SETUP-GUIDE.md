@@ -142,7 +142,7 @@ curl -fsSL https://raw.githubusercontent.com/wotzebra/shipyard/main/install.sh |
 
 ```bash
 cd golazo-backend
-shipyard
+shipyard init
 ```
 
 For more information: https://github.com/wotzebra/shipyard
@@ -163,7 +163,7 @@ curl -fsSL https://raw.githubusercontent.com/wotzebra/shipyard/main/install.sh |
 **Usage:**
 ```bash
 cd your-project
-shipyard
+shipyard init
 ```
 
 **Features:**

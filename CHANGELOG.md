@@ -8,12 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **BREAKING**: Command usage changed from `shipyard` to `shipyard init` for project initialization
+- Running `shipyard` without arguments now shows help instead of starting setup
 - Renamed registry file from `ports.lock` to `projects.conf` to better reflect its expanded purpose
 - Registry now tracks domain and proxy service (valet/herd) information in addition to ports
 - Updated registry file header to reflect new "Project Registry" purpose
 - Stale project cleanup now automatically removes proxy configurations when projects with registered domains are removed
 
 ### Added
+- `init` command for explicit project initialization
 - Domain tracking in project registry (`domain` field)
 - Proxy service tracking in project registry (`proxy_service` field)
 - Automatic proxy cleanup via `valet unproxy` or `herd unproxy` when stale projects are removed
