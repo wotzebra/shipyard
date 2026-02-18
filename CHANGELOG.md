@@ -7,12 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-18
+
 ### Added
 - `list` command to display all registered projects with their paths, domains, and port assignments
 - `cleanup` command to manually remove stale projects from the registry and clean up their resources (proxy configurations, Docker volumes)
+- Option to choose between HTTP and HTTPS for proxy configuration (via `--secure` flag)
+- User prompt to select protocol when registering domains
 
 ### Changed
 - Improved script output for better readability and user experience
+- Enhanced domain registration to support both HTTP and HTTPS modes
+
+### Fixed
+- Fixed cleanup command to properly handle stale projects and Docker resources
 
 ## [0.2.3] - 2026-02-18
 
