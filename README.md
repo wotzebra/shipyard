@@ -79,16 +79,20 @@ shipyard --help    # Show help
 
 ### Port Registry
 
-Shipyard maintains a global registry at `~/.config/shipyard/ports.lock` that tracks port assignments across all your Sail projects. This prevents port conflicts when running multiple projects simultaneously.
+Shipyard maintains a global registry at `~/.config/shipyard/projects.conf` that tracks project configurations including port assignments, domains, and proxy services across all your Sail projects. This prevents port conflicts when running multiple projects simultaneously.
 
 **Registry format:**
 ```ini
 [project-name]
 path=/path/to/project
+domain=my-project.test
+proxy_service=valet
 APP_PORT=8000
 VITE_PORT=5100
 FORWARD_DB_PORT=3300
 ```
+
+The `domain` and `proxy_service` fields are optional and only present if you registered a local domain through Valet or Herd.
 
 ### Port Assignment Strategy
 
@@ -212,7 +216,7 @@ export PATH="$HOME/.local/bin:$PATH"
 **Cause:** Project already has port assignments in the registry.
 
 **Solution:**
-- To re-assign ports: Remove the project section from `~/.config/shipyard/ports.lock`
+- To re-assign ports: Remove the project section from `~/.config/shipyard/projects.conf`
 - Or: Use the existing port assignments (check your `.env` file)
 
 ### Domain Already Registered (Valet/Herd)

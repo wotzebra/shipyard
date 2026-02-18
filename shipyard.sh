@@ -39,8 +39,8 @@ readonly EXIT_USER_CANCELLED=130
 
 # File paths
 readonly REGISTRY_DIR="$HOME/.config/shipyard"
-readonly REGISTRY_FILE="$REGISTRY_DIR/ports.lock"
-readonly LOCK_FILE="$REGISTRY_DIR/ports.lock.lock"
+readonly REGISTRY_FILE="$REGISTRY_DIR/projects.conf"
+readonly LOCK_FILE="$REGISTRY_DIR/projects.conf.lock"
 readonly LOCK_TIMEOUT=10
 readonly COMPOSE_FILE="${1:-docker-compose.yml}"
 readonly ENV_FILE=".env"
@@ -692,8 +692,8 @@ save_registry() {
     local temp_file="$REGISTRY_FILE.tmp"
 
     {
-        echo "# Shipyard Port Registry"
-        echo "# This file tracks port assignments across all projects"
+        echo "# Shipyard Project Registry"
+        echo "# This file tracks project configurations including ports, domains, and proxy services"
         echo "# Format: INI with [project-name] sections"
         echo ""
 
@@ -716,6 +716,12 @@ save_registry() {
         # Write new project
         echo "[$PROJECT_NAME]"
         echo "path=$(pwd)"
+
+        # Write domain and proxy service if registered
+        if [ "$DOMAIN_REGISTERED" = true ]; then
+            echo "domain=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+            echo "proxy_service=$SELECTED_DEV_TOOL"
+        fi
 
         # Write port assignments in sorted order
         for var_name in $(echo "${!PORT_ASSIGNMENTS[@]}" | tr ' ' '\n' | sort); do

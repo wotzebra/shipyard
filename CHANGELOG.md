@@ -5,12 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Renamed registry file from `ports.lock` to `projects.conf` to better reflect its expanded purpose
+- Registry now tracks domain and proxy service (valet/herd) information in addition to ports
+- Updated registry file header to reflect new "Project Registry" purpose
+
+### Added
+- Domain tracking in project registry (`domain` field)
+- Proxy service tracking in project registry (`proxy_service` field)
+
 ## [0.1.0] - 2025-02-17
 
 ### Added
 - Initial release
 - Automatic port assignment with conflict detection
-- Global port registry at `~/.config/shipyard/ports.lock`
+- Global port registry at `~/.config/shipyard/projects.conf`
 - Port conversion strategy (converts to 4-digit ports ending in 00)
 - System port availability checking via `/dev/tcp` and `lsof`
 - Domain registration support for Laravel Valet and Laravel Herd
