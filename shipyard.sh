@@ -1013,7 +1013,6 @@ ensure_compose_project_name() {
     # Set global PROJECT_NAME variable
     PROJECT_NAME="$project_name"
 }
-}
 
 # ==============================================================================
 # .ENV FILE FUNCTIONS
