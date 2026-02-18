@@ -1202,8 +1202,12 @@ append_ports_to_env() {
         # Add APP_URL based on domain registration or APP_PORT
         if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
             if [ "$DOMAIN_REGISTERED" = true ]; then
-                # Use HTTPS domain if registered
-                echo "APP_URL=https://${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+                # Use domain with protocol based on secure setting
+                if [ "$USE_SECURE_PROXY" = true ]; then
+                    echo "APP_URL=https://${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+                else
+                    echo "APP_URL=http://${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+                fi
                 echo "VITE_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
             else
                 # Fall back to localhost
@@ -1412,11 +1416,17 @@ find_ssl_certificates() {
 }
 
 symlink_certificates() {
+    # Always create certificates directory
+    if [ ! -d "$PROJECT_CERT_DIR" ]; then
+        mkdir -p "$PROJECT_CERT_DIR"
+        log_success "Created certificates/ directory"
+    fi
+
     if [ "$DOMAIN_REGISTERED" = false ]; then
         return 0
     fi
 
-    # Skip certificate handling if not using secure proxy
+    # Skip SSL certificate setup if using HTTP mode
     if [ "$USE_SECURE_PROXY" = false ]; then
         log_info "Skipping SSL certificate setup (HTTP mode)"
         return 0
@@ -1427,12 +1437,6 @@ symlink_certificates() {
         log_error "Could not find SSL certificates. You may need to run:"
         echo "  $SELECTED_DEV_TOOL secure $REGISTERED_DOMAIN"
         return 1
-    fi
-
-    # Create certificates directory
-    if [ ! -d "$PROJECT_CERT_DIR" ]; then
-        mkdir -p "$PROJECT_CERT_DIR"
-        log_success "Created certificates/ directory"
     fi
 
     # Create symlinks with generic names
@@ -1455,15 +1459,6 @@ symlink_certificates() {
 }
 
 update_gitignore_for_certs() {
-    if [ "$DOMAIN_REGISTERED" = false ]; then
-        return 0
-    fi
-
-    # Skip if not using secure proxy
-    if [ "$USE_SECURE_PROXY" = false ]; then
-        return 0
-    fi
-
     local gitignore_file=".gitignore"
 
     # Check if /certificates is already in .gitignore
@@ -1471,7 +1466,7 @@ update_gitignore_for_certs() {
         return 0
     fi
 
-    # Append to .gitignore
+    # Append to .gitignore (always add it since we always create the folder)
     echo "/certificates" >> "$gitignore_file"
     log_success "Added /certificates to .gitignore"
 
@@ -1878,7 +1873,11 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     # Build success message with APP_URL info
     local success_msg="Added $num_port_vars port assignment(s) to top of .env file"
     if [ "$DOMAIN_REGISTERED" = true ]; then
-        success_msg="$success_msg (APP_URL=https://${REGISTERED_DOMAIN}.${DOMAIN_TLD})"
+        if [ "$USE_SECURE_PROXY" = true ]; then
+            success_msg="$success_msg (APP_URL=https://${REGISTERED_DOMAIN}.${DOMAIN_TLD})"
+        else
+            success_msg="$success_msg (APP_URL=http://${REGISTERED_DOMAIN}.${DOMAIN_TLD})"
+        fi
     elif [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
         success_msg="$success_msg (APP_URL=http://localhost:${PORT_ASSIGNMENTS[APP_PORT]})"
     fi
