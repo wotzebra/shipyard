@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Automatic version check on startup with update prompt when newer version is available
 - Non-blocking update check with 5-second timeout to avoid hanging on slow connections
 
-## [0.1.0] - 2025-02-17
+## [0.1.0] - 2026-02-17
 
 ### Added
 - Initial release

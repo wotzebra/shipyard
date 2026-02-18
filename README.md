@@ -315,4 +315,4 @@ Issues and pull requests are welcome!
 
 ## Credits
 
-Built by the team at [WotZebra](https://github.com/wotzebra) for streamlined Laravel Sail project setup.
+Built by the team at [Who Owns The Zebra](https://github.com/wotzebra) for streamlined Laravel Sail project setup.
