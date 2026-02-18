@@ -581,6 +581,28 @@ cleanup_stale_projects() {
         if [ -n "$project_path" ] && [ ! -d "$project_path" ]; then
             projects_to_remove+=("$project")
             log_info "  × Project '$project' path no longer exists: $project_path"
+            
+            # Check if project has a domain and proxy service registered
+            local domain_var="registry_${project_sanitized}_domain"
+            local proxy_var="registry_${project_sanitized}_proxy_service"
+            local project_domain="${!domain_var}"
+            local project_proxy="${!proxy_var}"
+            
+            # Clean up proxy if it exists
+            if [ -n "$project_domain" ] && [ -n "$project_proxy" ]; then
+                log_info "    Removing proxy: $project_domain (via $project_proxy)"
+                
+                # Extract domain name without TLD
+                local domain_name="${project_domain%.*}"
+                
+                # Run unproxy command silently
+                if $project_proxy unproxy "$domain_name" >/dev/null 2>&1; then
+                    log_info "    ✓ Proxy removed successfully"
+                else
+                    log_info "    ! Failed to remove proxy (may have been already removed)"
+                fi
+            fi
+            
             removed_count=$((removed_count + 1))
         fi
     done
@@ -631,8 +653,8 @@ cleanup_stale_projects() {
     local temp_file="$REGISTRY_FILE.tmp"
 
     {
-        echo "# Shipyard Port Registry"
-        echo "# This file tracks port assignments across all projects"
+        echo "# Shipyard Project Registry"
+        echo "# This file tracks project configurations including ports, domains, and proxy services"
         echo "# Format: INI with [project-name] sections"
         echo ""
 

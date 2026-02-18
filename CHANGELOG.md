@@ -11,10 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Renamed registry file from `ports.lock` to `projects.conf` to better reflect its expanded purpose
 - Registry now tracks domain and proxy service (valet/herd) information in addition to ports
 - Updated registry file header to reflect new "Project Registry" purpose
+- Stale project cleanup now automatically removes proxy configurations when projects with registered domains are removed
 
 ### Added
 - Domain tracking in project registry (`domain` field)
 - Proxy service tracking in project registry (`proxy_service` field)
+- Automatic proxy cleanup via `valet unproxy` or `herd unproxy` when stale projects are removed
 
 ## [0.1.0] - 2025-02-17
 
