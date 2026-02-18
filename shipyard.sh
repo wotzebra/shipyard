@@ -80,6 +80,33 @@ USER_DOMAIN_NAME=""
 RUN_POST_SETUP=""
 
 # ==============================================================================
+# COLORS & STYLING
+# ==============================================================================
+
+# Check if colors should be disabled
+if [[ -z "${NO_COLOR:-}" ]] && [[ -t 1 ]]; then
+    # Color codes
+    readonly BLUE='\033[0;34m'
+    readonly CYAN='\033[0;36m'
+    readonly GREEN='\033[0;32m'
+    readonly RED='\033[0;31m'
+    readonly YELLOW='\033[1;33m'
+    readonly BOLD='\033[1m'
+    readonly DIM='\033[2m'
+    readonly NC='\033[0m' # No Color
+else
+    # No colors
+    readonly BLUE=""
+    readonly CYAN=""
+    readonly GREEN=""
+    readonly RED=""
+    readonly YELLOW=""
+    readonly BOLD=""
+    readonly DIM=""
+    readonly NC=""
+fi
+
+# ==============================================================================
 # LOGGING FUNCTIONS
 # ==============================================================================
 
@@ -88,11 +115,11 @@ log_info() {
 }
 
 log_success() {
-    echo "✓ $1"
+    echo -e "${GREEN}✓${NC} $1"
 }
 
 log_error() {
-    echo "Error: $1" >&2
+    echo -e "${RED}Error:${NC} $1" >&2
 }
 
 exit_with_error() {
@@ -140,6 +167,21 @@ Features:
 
 Documentation: https://github.com/wotzebra/shipyard
 EOF
+}
+
+show_title() {
+    echo -e "${CYAN}"
+    cat << 'EOF'
+   _____ __    _                             _
+  / ___// /_  (_)___  __  ______ ___________//
+  \__ \/ __ \/ / __ \/ / / / __ `/ ___/ __  /
+ ___/ / / / / / /_/ / /_/ / /_/ / /  / /_/ /
+/____/_/ /_/_/ .___/\__, /\__,_/_/   \__,_/
+            /_/    /____/
+EOF
+    echo -e "${NC}"
+    echo -e "⚓ ${DIM}v${VERSION} - Laravel Sail Project Setup${NC}"
+    echo ""
 }
 
 # ==============================================================================
@@ -270,12 +312,12 @@ check_for_updates() {
 
     # Show update warning
     echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "⚠️  UPDATE AVAILABLE"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}⚠️  UPDATE AVAILABLE${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo "  Current version: v$VERSION"
-    echo "  Latest version:  v$LATEST_VERSION"
+    echo -e "  ${DIM}Current version:${NC} v$VERSION"
+    echo -e "  ${BOLD}Latest version:${NC}  ${GREEN}v$LATEST_VERSION${NC}"
     echo ""
     echo "  It's recommended to update before continuing."
     echo ""
@@ -421,22 +463,22 @@ check_docker_networks() {
     # If there are many networks, check if cleanup might help
     if [ "$total_networks" -gt 20 ]; then
         echo ""
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "⚠️  WARNING: Many Docker networks detected ($total_networks)"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${YELLOW}⚠️  WARNING: Many Docker networks detected (${BOLD}$total_networks${NC}${YELLOW})${NC}"
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
-        echo "  Docker may fail to create new networks due to IP address pool exhaustion."
-        echo "  This commonly happens with error:"
-        echo "  'could not find an available, non-overlapping IPv4 address pool'"
+        echo -e "  ${DIM}Docker may fail to create new networks due to IP address pool exhaustion.${NC}"
+        echo -e "  ${DIM}This commonly happens with error:${NC}"
+        echo -e "  ${RED}'could not find an available, non-overlapping IPv4 address pool'${NC}"
         echo ""
-        echo "  Cleaning up unused Docker networks can help prevent this issue."
+        echo -e "  Cleaning up unused Docker networks can help prevent this issue."
         echo ""
 
-        read -r -p "Would you like to clean up unused networks now? [y/N] " response
+        read -r -p "Clean up unused networks now? [y/N] " response
 
         if [[ "$response" =~ ^[Yy]$ ]]; then
             echo ""
-            log_info "Cleaning up unused Docker networks..."
+            echo "Cleaning up unused Docker networks..."
             local before_count
             before_count=$(docker network ls --filter "driver=bridge" --format "{{.Name}}" 2>/dev/null | grep -v "^bridge$" | wc -l | tr -d ' ')
 
@@ -447,13 +489,13 @@ check_docker_networks() {
                 log_success "Removed $removed unused network(s)"
             else
                 log_error "Failed to clean up networks"
-                echo "You may need to run: docker network prune -f"
+                echo -e "${DIM}You may need to run: docker network prune -f${NC}"
             fi
             echo ""
         else
             echo ""
-            log_info "Skipping network cleanup. If you encounter network errors, run:"
-            echo "  docker network prune -f"
+            echo -e "${DIM}→ Skipping network cleanup. If you encounter network errors, run:${NC}"
+            echo -e "${DIM}  docker network prune -f${NC}"
             echo ""
         fi
     fi
@@ -1280,12 +1322,13 @@ update_gitignore_for_certs() {
 
 collect_user_input() {
     echo ""
-    log_info "=========================================="
-    log_info "User Input Collection"
-    log_info "=========================================="
     echo ""
-    log_info "Please provide all required information upfront."
-    log_info "After this, the script will run without further interaction."
+    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${CYAN}║  📝  INTERACTIVE SETUP                                           ║${NC}"
+    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${DIM}Please answer a few questions to configure your project.${NC}"
+    echo -e "${DIM}After this, everything will run automatically.${NC}"
     echo ""
 
     # 1. Collect Composer credentials for private repositories
@@ -1297,21 +1340,27 @@ collect_user_input() {
     local repositories=($(extract_composer_repositories))
 
     if [ ${#repositories[@]} -gt 0 ]; then
-        log_info "Found ${#repositories[@]} private repository/repositories in composer.json:"
+        echo ""
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${BOLD}🔐 Private Repository Authentication${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo -e "Found ${BOLD}${#repositories[@]}${NC} private repository/repositories in composer.json:"
         for repo in "${repositories[@]}"; do
-            echo "  - $repo"
+            echo -e "  ${DIM}•${NC} $repo"
         done
         echo ""
 
         local repo_index=1
         for repo in "${repositories[@]}"; do
-            echo "Repository $repo_index/$((${#repositories[@]})): $repo"
-            echo -n "  Enter username (or press Enter to use 'token'): "
+            echo -e "${BOLD}Repository $repo_index/${#repositories[@]}:${NC} ${CYAN}$repo${NC}"
+            echo -n "  Username (or press Enter to use 'token'): "
             read -r username
             username=${username:-token}
 
-            echo -n "  Enter password/token: "
-            read -r password
+            echo -n "  Password/token (input hidden): "
+            read -s -r password
+            echo ""
 
             if [ -z "$password" ]; then
                 echo ""
@@ -1324,7 +1373,7 @@ collect_user_input() {
             COMPOSER_REPO_USERNAMES+=("$username")
             COMPOSER_REPO_PASSWORDS+=("$password")
 
-            echo "  ✓ Credentials stored for $repo"
+            log_success "Credentials stored for $repo"
             echo ""
 
             repo_index=$((repo_index + 1))
@@ -1337,7 +1386,12 @@ collect_user_input() {
     # 3. Ask about domain registration
     if [ "$VALET_AVAILABLE" = true ] || [ "$HERD_AVAILABLE" = true ]; then
         echo ""
-        echo -n "Would you like to register a local domain for this project? [Y/n]: "
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${BOLD}🌐 Local Domain Registration${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo -e "${DIM}Would you like to register a local domain for this project?${NC}"
+        echo -n "Register domain? [Y/n]: "
         read -r response
         response=${response:-Y}
 
@@ -1347,16 +1401,16 @@ collect_user_input() {
             # Select dev tool
             if [ "$VALET_AVAILABLE" = true ] && [ "$HERD_AVAILABLE" = false ]; then
                 SELECTED_DEV_TOOL="valet"
-                log_info "Using Valet for domain management"
+                echo -e "${DIM}→ Using Valet for domain management${NC}"
             elif [ "$HERD_AVAILABLE" = true ] && [ "$VALET_AVAILABLE" = false ]; then
                 SELECTED_DEV_TOOL="herd"
-                log_info "Using Herd for domain management"
+                echo -e "${DIM}→ Using Herd for domain management${NC}"
             else
                 # Both are available, ask user
                 echo ""
-                log_info "Both Valet and Herd are installed. Which should be used?"
-                echo "  [1] Valet"
-                echo "  [2] Herd"
+                echo -e "${BOLD}Both Valet and Herd are installed. Which should be used?${NC}"
+                echo -e "  ${CYAN}[1]${NC} Valet"
+                echo -e "  ${CYAN}[2]${NC} Herd"
                 echo -n "Select tool [1]: "
                 read -r selection
                 selection=${selection:-1}
@@ -1364,14 +1418,14 @@ collect_user_input() {
                 case $selection in
                     1)
                         SELECTED_DEV_TOOL="valet"
-                        log_info "Selected: Valet"
+                        log_success "Selected: Valet"
                         ;;
                     2)
                         SELECTED_DEV_TOOL="herd"
-                        log_info "Selected: Herd"
+                        log_success "Selected: Herd"
                         ;;
                     *)
-                        log_error "Invalid selection. Defaulting to Valet."
+                        echo -e "${YELLOW}Invalid selection. Defaulting to Valet.${NC}"
                         SELECTED_DEV_TOOL="valet"
                         ;;
                 esac
@@ -1384,7 +1438,9 @@ collect_user_input() {
             # Loop until valid domain name is provided
             while true; do
                 echo ""
-                echo -n "Enter domain name (without .$DOMAIN_TLD) [$suggested_domain]: "
+                echo -e "${BOLD}Domain Configuration${NC}"
+                echo -e "${DIM}Enter domain name (without .${DOMAIN_TLD})${NC}"
+                echo -n "Domain name [$suggested_domain]: "
                 read -r domain
                 domain=${domain:-$suggested_domain}
 
@@ -1392,13 +1448,13 @@ collect_user_input() {
                 if ! validate_domain_name "$domain"; then
                     echo ""
                     log_error "Invalid domain name. Use only alphanumeric characters and hyphens."
-                    echo "Domain cannot start or end with a hyphen."
+                    echo -e "${DIM}Domain cannot start or end with a hyphen.${NC}"
                     echo ""
                     echo -n "Try again? [Y/n]: "
                     read -r retry
                     retry=${retry:-Y}
                     if [[ ! "$retry" =~ ^[Yy]$ ]]; then
-                        log_info "Cancelled domain registration"
+                        echo -e "${DIM}→ Cancelled domain registration${NC}"
                         REGISTER_DOMAIN=false
                         break
                     fi
@@ -1410,14 +1466,14 @@ collect_user_input() {
                     echo ""
                     log_error "Domain '$domain.$DOMAIN_TLD' is already registered as a proxy."
                     echo ""
-                    echo "Existing proxies:"
+                    echo -e "${DIM}Existing proxies:${NC}"
                     $SELECTED_DEV_TOOL proxies 2>/dev/null | grep "| $domain " || true
                     echo ""
                     echo -n "Try a different domain name? [Y/n]: "
                     read -r retry
                     retry=${retry:-Y}
                     if [[ ! "$retry" =~ ^[Yy]$ ]]; then
-                        log_info "Cancelled domain registration"
+                        echo -e "${DIM}→ Cancelled domain registration${NC}"
                         REGISTER_DOMAIN=false
                         break
                     fi
@@ -1426,30 +1482,72 @@ collect_user_input() {
 
                 # Domain is valid and available
                 USER_DOMAIN_NAME="$domain"
-                log_success "Domain name validated: $domain.$DOMAIN_TLD"
+                log_success "Domain name validated: ${CYAN}$domain.$DOMAIN_TLD${NC}"
                 break
             done
         else
-            log_info "Skipping domain registration"
+            echo -e "${DIM}→ Skipping domain registration${NC}"
         fi
     fi
 
     # 4. Ask about post-setup commands
     echo ""
-    echo "=========================================="
-    echo "Post-Setup Commands"
-    echo "=========================================="
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}⚡ Post-Setup Automation${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo "After port assignment, these commands can be run:"
-    echo "  1. Start Docker containers (vendor/bin/sail up -d)"
-    echo "  2. Run Laravel setup (vendor/bin/sail composer setup)"
+    echo -e "${DIM}After port assignment, these commands can be run:${NC}"
+    echo -e "  ${DIM}1.${NC} Start Docker containers ${DIM}(vendor/bin/sail up -d)${NC}"
+    echo -e "  ${DIM}2.${NC} Run Laravel setup ${DIM}(vendor/bin/sail composer setup)${NC}"
     echo ""
-    echo -n "Would you like to run these commands automatically? [Y/n]: "
+    echo -n "Run these commands automatically? [Y/n]: "
     read -r RUN_POST_SETUP
     RUN_POST_SETUP=${RUN_POST_SETUP:-Y}
 
     echo ""
-    log_success "All user input collected successfully!"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}${BOLD}✓ All user input collected!${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${BOLD}Configuration Summary:${NC}"
+    if [ ${#COMPOSER_REPO_USERNAMES[@]} -gt 0 ]; then
+        echo -e "  ${DIM}•${NC} Private repositories: ${BOLD}${#COMPOSER_REPO_USERNAMES[@]}${NC} configured"
+    fi
+    if [ "$REGISTER_DOMAIN" = true ]; then
+        echo -e "  ${DIM}•${NC} Domain: ${CYAN}$USER_DOMAIN_NAME.$DOMAIN_TLD${NC} (via $SELECTED_DEV_TOOL)"
+    else
+        echo -e "  ${DIM}•${NC} Domain: ${DIM}Not configured${NC}"
+    fi
+    if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
+        echo -e "  ${DIM}•${NC} Post-setup: ${GREEN}Auto-run enabled${NC}"
+    else
+        echo -e "  ${DIM}•${NC} Post-setup: ${DIM}Manual${NC}"
+    fi
+    echo ""
+    echo -e "${DIM}The following steps will be performed:${NC}"
+    echo -e "  ${DIM}1.${NC} Assign available ports for the project"
+    echo -e "  ${DIM}2.${NC} Update .env file with port assignments"
+    echo -e "  ${DIM}3.${NC} Register project in Shipyard registry"
+    if [ "$REGISTER_DOMAIN" = true ]; then
+        echo -e "  ${DIM}4.${NC} Configure local domain and SSL certificates"
+    fi
+    if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
+        echo -e "  ${DIM}5.${NC} Start Docker containers and run Laravel setup"
+    fi
+    echo ""
+    read -r -p "Continue with setup? [Y/n] " confirm
+    confirm=${confirm:-Y}
+
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        echo ""
+        echo -e "${YELLOW}Setup cancelled by user.${NC}"
+        echo ""
+        echo -e "${DIM}You can run 'shipyard init' again when ready.${NC}"
+        exit $EXIT_USER_CANCELLED
+    fi
+
+    echo ""
+    echo -e "${DIM}Starting setup...${NC}"
     echo ""
 }
 
@@ -1465,8 +1563,8 @@ main() {
     # Check for updates before starting
     check_for_updates
 
-    # Header
-    log_info "Setting up Laravel Sail project..."
+    # Show title banner
+    show_title
     log_info "(Press Ctrl+C at any time to cancel)"
     echo ""
 
@@ -1630,35 +1728,35 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         log_success "Laravel setup completed"
 
         echo ""
-        echo "=========================================="
-        log_success "All setup complete! 🎉"
-        echo "=========================================="
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN}${BOLD}✓ All setup complete! 🎉${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
         if [ "$DOMAIN_REGISTERED" = true ]; then
             echo ""
-            echo "Your application is accessible at:"
-            echo "  https://${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+            echo -e "${BOLD}Your application is accessible at:${NC}"
+            echo -e "  ${CYAN}https://${REGISTERED_DOMAIN}.${DOMAIN_TLD}${NC}"
             echo ""
-            echo "SSL certificates are symlinked in ./${PROJECT_CERT_DIR}/"
-            echo "  - cert.crt"
-            echo "  - cert.key"
+            echo -e "${DIM}SSL certificates are symlinked in ./${PROJECT_CERT_DIR}/${NC}"
+            echo -e "${DIM}  • cert.crt${NC}"
+            echo -e "${DIM}  • cert.key${NC}"
             echo ""
-            echo "Docker is listening on localhost:${PORT_ASSIGNMENTS[APP_PORT]}"
-            echo "Valet/Herd proxy: ${REGISTERED_DOMAIN}.${DOMAIN_TLD} → localhost:${PORT_ASSIGNMENTS[APP_PORT]}"
+            echo -e "${DIM}Docker is listening on localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
+            echo -e "${DIM}Valet/Herd proxy: ${REGISTERED_DOMAIN}.${DOMAIN_TLD} → localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
         elif [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
             echo ""
-            echo "Your application should be accessible at:"
-            echo "  http://localhost:${PORT_ASSIGNMENTS[APP_PORT]}"
+            echo -e "${BOLD}Your application should be accessible at:${NC}"
+            echo -e "  ${CYAN}http://localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
         fi
     else
         echo ""
-        echo "=========================================="
-        echo "Next steps: Start containers and run setup"
-        echo "=========================================="
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${YELLOW}Next steps: Start containers and run setup${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
         echo "To complete setup manually, run:"
-        echo "  1. ./vendor/bin/sail up -d"
-        echo "  2. ./vendor/bin/sail composer setup"
+        echo -e "  ${DIM}1.${NC} ./vendor/bin/sail up -d"
+        echo -e "  ${DIM}2.${NC} ./vendor/bin/sail composer setup"
     fi
 }
 
