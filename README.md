@@ -209,6 +209,29 @@ export PATH="$HOME/.local/bin:$PATH"
 - Start Docker Desktop
 - Verify with: `docker info`
 
+### Docker Network Error: "could not find an available, non-overlapping IPv4 address pool"
+
+**Cause:** Docker has run out of available IP address ranges due to too many unused networks.
+
+**Solution:**
+
+Shipyard will automatically detect this issue and offer to clean up unused networks. You can also manually clean up:
+
+```bash
+docker network prune -f
+```
+
+Or remove specific networks:
+```bash
+docker network ls
+docker network rm <network-id>
+```
+
+**Prevention:** Regularly clean up stopped containers and unused networks:
+```bash
+docker system prune -f
+```
+
 ### Port Already in Use
 
 **Cause:** Port is in use by another service or project.

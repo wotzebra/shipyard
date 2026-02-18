@@ -411,6 +411,55 @@ Please start Docker Desktop and try again."
     log_success "Docker is running"
 }
 
+check_docker_networks() {
+    # Check for Docker network address pool exhaustion
+    # This is a common issue when too many unused networks exist
+    
+    # Count total bridge networks (excluding default bridge)
+    local total_networks
+    total_networks=$(docker network ls --filter "driver=bridge" --format "{{.Name}}" 2>/dev/null | grep -v "^bridge$" | wc -l | tr -d ' ')
+    
+    # If there are many networks, check if cleanup might help
+    if [ "$total_networks" -gt 20 ]; then
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "⚠️  WARNING: Many Docker networks detected ($total_networks)"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "  Docker may fail to create new networks due to IP address pool exhaustion."
+        echo "  This commonly happens with error:"
+        echo "  'could not find an available, non-overlapping IPv4 address pool'"
+        echo ""
+        echo "  Cleaning up unused Docker networks can help prevent this issue."
+        echo ""
+        
+        read -r -p "Would you like to clean up unused networks now? [y/N] " response
+        
+        if [[ "$response" =~ ^[Yy]$ ]]; then
+            echo ""
+            log_info "Cleaning up unused Docker networks..."
+            local before_count
+            before_count=$(docker network ls --filter "driver=bridge" --format "{{.Name}}" 2>/dev/null | grep -v "^bridge$" | wc -l | tr -d ' ')
+            
+            if docker network prune -f >/dev/null 2>&1; then
+                local after_count
+                after_count=$(docker network ls --filter "driver=bridge" --format "{{.Name}}" 2>/dev/null | grep -v "^bridge$" | wc -l | tr -d ' ')
+                local removed=$((before_count - after_count))
+                log_success "Removed $removed unused network(s)"
+            else
+                log_error "Failed to clean up networks"
+                echo "You may need to run: docker network prune -f"
+            fi
+            echo ""
+        else
+            echo ""
+            log_info "Skipping network cleanup. If you encounter network errors, run:"
+            echo "  docker network prune -f"
+            echo ""
+        fi
+    fi
+}
+
 validate_docker_compose() {
     if [ ! -f "$COMPOSE_FILE" ]; then
         exit_with_error $EXIT_COMPOSE_NOT_FOUND "docker-compose file not found: $COMPOSE_FILE"
@@ -1406,32 +1455,35 @@ main() {
     # Step 1: Validate Docker is installed and running
     validate_docker
 
-    # Step 2: Validate docker-compose.yml exists
+    # Step 2: Check for Docker network issues
+    check_docker_networks
+
+    # Step 3: Validate docker-compose.yml exists
     validate_docker_compose
 
-    # Step 3: Collect all user input upfront
+    # Step 4: Collect all user input upfront
     collect_user_input
 
-    # Step 4: Run composer install (non-interactive)
+    # Step 5: Run composer install (non-interactive)
     run_composer_install
 
-    # Step 5: Validate/create .env file
+    # Step 6: Validate/create .env file
     validate_env_file
 
-    # Step 6: Check .env for existing port definitions
+    # Step 7: Check .env for existing port definitions
     check_env_for_ports
 
-    # Step 7: Acquire lock on registry
+    # Step 8: Acquire lock on registry
     acquire_lock
     log_success "Acquired registry lock"
 
-    # Step 8: Get or generate project name (if not already set during input collection)
+    # Step 9: Get or generate project name (if not already set during input collection)
     if [ -z "$PROJECT_NAME" ]; then
         ensure_compose_project_name
     fi
     log_info "Project identifier: $PROJECT_NAME"
 
-    # Step 9: Load existing registry
+    # Step 10: Load existing registry
     parse_ini_file
 
     # Step 10: Clean up stale projects (paths that no longer exist)
