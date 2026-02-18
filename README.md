@@ -133,6 +133,105 @@ If you have Valet or Herd installed, Shipyard can:
 
 **Result:** Access your app via `https://myproject.test` with valid SSL certificate.
 
+### Using SSL Certificates with Vite Dev Server
+
+When you register a domain with SSL, Shipyard creates certificate symlinks in the `certificates/` directory and automatically adds `/certificates` to your `.gitignore` file. To use these certificates with Vite's dev server inside your Sail container:
+
+#### 1. Mount Certificates in Docker Compose
+
+Add the certificate volume mounts to your `docker-compose.yml`:
+
+```yaml
+services:
+    laravel.test:
+        volumes:
+            - '.:/var/www/html:delegated'
+            # Mount SSL certificates (read-only)
+            - type: bind
+              source: './certificates/cert.key'
+              target: /var/www/certificates/cert.key
+              read_only: true
+            - type: bind
+              source: './certificates/cert.crt'
+              target: /var/www/certificates/cert.crt
+              read_only: true
+```
+
+**Note:** The `read_only: true` flag prevents accidental modification of your SSL certificates.
+
+**Important:** The `certificates/` directory is automatically added to your `.gitignore` file by Shipyard, as these are symlinks to your local Valet/Herd certificates and should not be committed to version control.
+
+#### 2. Configure Vite for HTTPS
+
+Update your `vite.config.js` to use the certificates when running in HTTPS mode:
+
+```javascript
+import tailwindcss from '@tailwindcss/vite';
+import laravel from 'laravel-vite-plugin';
+import {defineConfig, loadEnv} from 'vite';
+import fs from 'fs';
+
+export default defineConfig(({ mode }) => {
+    const env = loadEnv(mode, process.cwd(), '');
+
+    return {
+        build: {
+            sourcemap: true,
+        },
+        plugins: [
+            laravel({
+                input: [
+                    'resources/css/app.css',
+                    'resources/js/app.js',
+                ],
+                refresh: true,
+            }),
+            tailwindcss(),
+        ],
+        server: env.VITE_SERVER_HOST !== 'localhost' ? {
+            host: env.VITE_SERVER_HOST,
+            hmr: {
+                host: env.VITE_SERVER_HOST,
+            },
+            https: {
+                key: fs.readFileSync('/var/www/certificates/cert.key'),
+                cert: fs.readFileSync('/var/www/certificates/cert.crt'),
+            }
+        } : null,
+    };
+});
+```
+
+#### 3. Environment Configuration
+
+When Shipyard registers a domain with SSL, it automatically updates your `.env` file:
+
+```bash
+APP_URL=https://myproject.test
+VITE_SERVER_HOST=myproject.test
+ASSET_URL="${APP_URL}"
+```
+
+**How it works:**
+- When `VITE_SERVER_HOST` is set to your domain (not `localhost`), Vite uses HTTPS with the mounted certificates
+- Hot Module Replacement (HMR) connects via `wss://myproject.test`
+- Assets are served with valid SSL certificates
+
+#### 4. Start Development
+
+```bash
+# Start Sail containers
+sail up -d
+
+# Start Vite dev server (with HTTPS)
+sail npm run dev
+```
+
+Your app will be accessible at `https://myproject.test` with:
+- Valid SSL certificate (no browser warnings)
+- Hot Module Replacement working over WSS
+- All assets served securely
+
 ## Configuration
 
 ### Project Identification
