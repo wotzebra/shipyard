@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-02-18
+
+### Changed
+- Project name generation now always normalizes to valid Docker Compose format (lowercase, alphanumeric characters and underscores only)
+- `COMPOSE_PROJECT_NAME` is now always set in `.env` file based on the normalized project path, ensuring consistency with Docker Compose behavior
+- Simplified project name handling by removing conditional logic for `COMPOSE_PROJECT_NAME` assignment
+
+### Fixed
+- Project names now properly match Docker Compose project names, avoiding container naming conflicts
+
 ## [0.2.2] - 2026-02-18
 
 ### Added
@@ -79,5 +89,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Proper error handling with meaningful exit codes
 - Clean interrupt handling (releases locks on Ctrl+C)
 - No external dependencies beyond curl, Docker, and standard Unix tools
-
-[0.1.0]: https://github.com/wotzebra/shipyard/releases/tag/v0.1.0
