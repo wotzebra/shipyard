@@ -149,7 +149,9 @@ Shipyard automatically removes projects from the registry whose directories no l
 
 ## Updating
 
-Update to the latest version:
+Shipyard automatically checks for updates when you run it and will prompt you to update if a newer version is available.
+
+To manually update to the latest version:
 
 ```bash
 shipyard --update
@@ -160,6 +162,8 @@ This will:
 - Download and replace the current script
 - Preserve executable permissions
 - Show version change information
+
+**Note:** The automatic update check has a 5-second timeout and fails silently if GitHub is unreachable, so it won't block your workflow.
 
 ## Uninstalling
 

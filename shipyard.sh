@@ -138,47 +138,47 @@ EOF
 }
 
 # ==============================================================================
-# UPDATE FUNCTION
+# UPDATE FUNCTIONS
 # ==============================================================================
 
-update_self() {
-    log_info "Checking for updates..."
+fetch_latest_version() {
+    # Fetch latest version from GitHub API
+    # Args:
+    #   $1 - timeout in seconds (optional, default: no timeout)
+    # Returns:
+    #   0 if successful (sets LATEST_VERSION variable)
+    #   1 if failed
 
-    # Fetch latest release information from GitHub API
+    local timeout_args=""
+    if [ -n "${1:-}" ]; then
+        timeout_args="--connect-timeout $1 --max-time $1"
+    fi
+
     local API_RESPONSE
-    API_RESPONSE=$(curl -fsSL https://api.github.com/repos/wotzebra/shipyard/releases/latest 2>/dev/null)
+    API_RESPONSE=$(curl -fsSL $timeout_args https://api.github.com/repos/wotzebra/shipyard/releases/latest 2>/dev/null)
 
     if [ -z "$API_RESPONSE" ]; then
-        log_error "Could not fetch latest version from GitHub"
-        echo ""
-        echo "This might be due to:"
-        echo "  • Network connectivity issues"
-        echo "  • GitHub API rate limiting"
-        echo ""
-        echo "Try again later or check: https://github.com/wotzebra/shipyard/releases"
-        exit 1
+        return 1
     fi
 
     # Extract version tag (remove 'v' prefix)
-    local LATEST_VERSION
     LATEST_VERSION=$(echo "$API_RESPONSE" | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
 
     if [ -z "$LATEST_VERSION" ]; then
-        log_error "Could not parse latest version"
-        exit 1
+        return 1
     fi
 
-    # Compare versions
-    if [ "$VERSION" = "$LATEST_VERSION" ]; then
-        log_success "Already at latest version (v$VERSION)"
-        return 0
-    fi
+    return 0
+}
 
-    echo ""
-    log_info "Current version: v$VERSION"
-    log_info "Latest version:  v$LATEST_VERSION"
-    echo ""
-    log_info "Updating..."
+perform_update() {
+    # Perform the actual update download and installation
+    # Args:
+    #   $1 - latest version string
+
+    local latest_version="$1"
+
+    log_info "Updating to v$latest_version..."
 
     # Get script path
     local SCRIPT_PATH
@@ -186,7 +186,7 @@ update_self() {
     local TEMP_FILE="${SCRIPT_PATH}.tmp"
 
     # Download latest release
-    local DOWNLOAD_URL="https://github.com/wotzebra/shipyard/releases/download/v${LATEST_VERSION}/shipyard.sh"
+    local DOWNLOAD_URL="https://github.com/wotzebra/shipyard/releases/download/v${latest_version}/shipyard.sh"
 
     if ! curl -fsSL "$DOWNLOAD_URL" -o "$TEMP_FILE"; then
         log_error "Failed to download update"
@@ -215,9 +215,80 @@ update_self() {
     fi
 
     echo ""
-    log_success "Successfully updated to v$LATEST_VERSION"
+    log_success "Successfully updated to v$latest_version"
+}
+
+update_self() {
+    log_info "Checking for updates..."
+
+    if ! fetch_latest_version; then
+        log_error "Could not fetch latest version from GitHub"
+        echo ""
+        echo "This might be due to:"
+        echo "  • Network connectivity issues"
+        echo "  • GitHub API rate limiting"
+        echo ""
+        echo "Try again later or check: https://github.com/wotzebra/shipyard/releases"
+        exit 1
+    fi
+
+    # Compare versions
+    if [ "$VERSION" = "$LATEST_VERSION" ]; then
+        log_success "Already at latest version (v$VERSION)"
+        return 0
+    fi
+
+    echo ""
+    log_info "Current version: v$VERSION"
+    log_info "Latest version:  v$LATEST_VERSION"
+    echo ""
+
+    perform_update "$LATEST_VERSION"
+
     echo ""
     echo "Run 'shipyard --version' to verify"
+}
+
+check_for_updates() {
+    # Silently check for updates (don't block on failure)
+    # Uses 5-second timeout to avoid hanging
+
+    if ! fetch_latest_version 5; then
+        # Silently continue if check fails
+        return 0
+    fi
+
+    # If we're on the latest version, continue silently
+    if [ "$VERSION" = "$LATEST_VERSION" ]; then
+        return 0
+    fi
+
+    # Show update warning
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "⚠️  UPDATE AVAILABLE"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "  Current version: v$VERSION"
+    echo "  Latest version:  v$LATEST_VERSION"
+    echo ""
+    echo "  It's recommended to update before continuing."
+    echo ""
+
+    # Prompt user
+    read -r -p "Do you want to update now? [y/N] " response
+
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+        echo ""
+        perform_update "$LATEST_VERSION"
+        echo ""
+        echo "Please run 'shipyard' again to continue with the updated version."
+        exit 0
+    fi
+
+    echo ""
+    echo "Continuing with current version..."
+    echo ""
 }
 
 # ==============================================================================
@@ -581,20 +652,20 @@ cleanup_stale_projects() {
         if [ -n "$project_path" ] && [ ! -d "$project_path" ]; then
             projects_to_remove+=("$project")
             log_info "  × Project '$project' path no longer exists: $project_path"
-            
+
             # Check if project has a domain and proxy service registered
             local domain_var="registry_${project_sanitized}_domain"
             local proxy_var="registry_${project_sanitized}_proxy_service"
             local project_domain="${!domain_var}"
             local project_proxy="${!proxy_var}"
-            
+
             # Clean up proxy if it exists
             if [ -n "$project_domain" ] && [ -n "$project_proxy" ]; then
                 log_info "    Removing proxy: $project_domain (via $project_proxy)"
-                
+
                 # Extract domain name without TLD
                 local domain_name="${project_domain%.*}"
-                
+
                 # Run unproxy command silently
                 if $project_proxy unproxy "$domain_name" >/dev/null 2>&1; then
                     log_info "    ✓ Proxy removed successfully"
@@ -602,7 +673,7 @@ cleanup_stale_projects() {
                     log_info "    ! Failed to remove proxy (may have been already removed)"
                 fi
             fi
-            
+
             removed_count=$((removed_count + 1))
         fi
     done
@@ -1312,6 +1383,9 @@ main() {
     # Setup cleanup and interrupt handlers
     trap cleanup_on_exit EXIT
     trap handle_interrupt INT TERM
+
+    # Check for updates before starting
+    check_for_updates
 
     # Header
     log_info "Setting up Laravel Sail project..."
