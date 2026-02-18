@@ -775,8 +775,8 @@ cleanup_stale_projects() {
             # Check if project has a domain and proxy service registered
             local domain_var="registry_${project_sanitized}_domain"
             local proxy_var="registry_${project_sanitized}_proxy_service"
-            local project_domain="${!domain_var}"
-            local project_proxy="${!proxy_var}"
+            local project_domain="${!domain_var:-}"
+            local project_proxy="${!proxy_var:-}"
 
             # Clean up proxy if it exists
             if [ -n "$project_domain" ] && [ -n "$project_proxy" ]; then
