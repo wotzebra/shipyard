@@ -70,6 +70,8 @@ The wizard will guide you through:
 
 ```bash
 shipyard init      # Initialize project setup
+shipyard list      # Show all registered projects
+shipyard cleanup   # Clean up stale projects from registry
 shipyard --version # Show version
 shipyard --update  # Update to latest version
 shipyard --help    # Show help
@@ -231,20 +233,6 @@ Your app will be accessible at `https://myproject.test` with:
 - Valid SSL certificate (no browser warnings)
 - Hot Module Replacement working over WSS
 - All assets served securely
-
-## Configuration
-
-### Project Identification
-
-Shipyard identifies projects using `COMPOSE_PROJECT_NAME` from `.env`. If not set, it generates one from the project path.
-
-**Example:**
-- Path: `/Users/john/Sites/my-app`
-- Generated: `COMPOSE_PROJECT_NAME=Users_john_Sites_my_app`
-
-### Stale Project Cleanup
-
-Shipyard automatically removes projects from the registry whose directories no longer exist, freeing up their ports for reuse.
 
 ## Updating
 
