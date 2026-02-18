@@ -144,12 +144,14 @@ show_help() {
     cat << EOF
 Usage:
   shipyard init         Initialize a Laravel Sail project
+  shipyard list         List all registered projects
   shipyard cleanup      Clean up Docker resources and stale projects
   shipyard [options]
 
 Commands:
   init                  Set up the Laravel Sail project in current directory
                         (automatic port assignment, domain configuration, etc.)
+  list                  Show all registered projects from config file
   cleanup               Clean up stale projects from registry
 
 Options:
@@ -159,6 +161,7 @@ Options:
 
 Examples:
   shipyard init         # Set up project in current directory
+  shipyard list         # Show all registered projects
   shipyard cleanup      # Clean up Docker resources and stale projects
   shipyard --update     # Update Shipyard to latest version
 
@@ -355,6 +358,11 @@ parse_arguments() {
         cleanup)
             # Run cleanup command
             run_cleanup_command
+            exit 0
+            ;;
+        list)
+            # List registered projects
+            run_list_command
             exit 0
             ;;
         --version|-v)
@@ -920,6 +928,75 @@ run_cleanup_command() {
     fi
 
     log_success "Cleanup complete!"
+    echo ""
+}
+
+run_list_command() {
+    # List all registered projects from the config file
+    show_title
+    echo ""
+
+    # Parse registry file first
+    parse_ini_file
+
+    if [ ${#REGISTRY_PROJECTS[@]} -eq 0 ]; then
+        log_info "No registered projects found"
+        echo ""
+        echo "Run 'shipyard init' in a project directory to register a new project."
+        echo ""
+        return 0
+    fi
+
+    log_info "Registered Projects (${#REGISTRY_PROJECTS[@]})"
+    echo ""
+
+    # Display each project with its details
+    for project in "${REGISTRY_PROJECTS[@]}"; do
+        local project_sanitized=$(sanitize_project_name "$project")
+        local path_var="registry_${project_sanitized}_path"
+        local domain_var="registry_${project_sanitized}_domain"
+        local proxy_var="registry_${project_sanitized}_proxy_service"
+
+        echo -e "${BOLD}${project}${NC}"
+        
+        # Show path
+        if [ -n "${!path_var:-}" ]; then
+            echo "  Path:   ${!path_var}"
+            # Check if path still exists
+            if [ ! -d "${!path_var}" ]; then
+                echo -e "  ${YELLOW}⚠ Path no longer exists${NC}"
+            fi
+        fi
+        
+        # Show domain if available
+        if [ -n "${!domain_var:-}" ]; then
+            local proxy_service="${!proxy_var:-unknown}"
+            echo "  Domain: ${!domain_var} (${proxy_service})"
+        fi
+        
+        # Show all port variables dynamically
+        local ports=()
+        while IFS= read -r varname; do
+            if [[ "$varname" =~ ^registry_${project_sanitized}_(.+_PORT)$ ]]; then
+                local port_name="${BASH_REMATCH[1]}"
+                local port_value="${!varname}"
+                if [ -n "$port_value" ]; then
+                    ports+=("${port_name}:${port_value}")
+                fi
+            fi
+        done < <(compgen -v "registry_${project_sanitized}_")
+        
+        if [ ${#ports[@]} -gt 0 ]; then
+            echo "  Ports:"
+            for port_info in "${ports[@]}"; do
+                echo "    ${port_info}"
+            done
+        fi
+        
+        echo ""
+    done
+
+    log_info "Config file: $REGISTRY_FILE"
     echo ""
 }
 
