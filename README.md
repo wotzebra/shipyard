@@ -63,8 +63,9 @@ The wizard will guide you through:
 1. **Composer Authentication** - Provide credentials for private repositories
 2. **Port Assignment** - Automatic detection and conflict resolution
 3. **Domain Registration** (Optional) - Register a `.test` domain via Valet/Herd
-4. **SSL Certificates** (If domain registered) - Automatic certificate setup
-5. **Post-Setup Commands** (Optional) - Start containers and run Laravel setup
+4. **Protocol Selection** (If domain registered) - Choose between HTTPS (secure) or HTTP
+5. **SSL Certificates** (If HTTPS selected) - Automatic certificate setup
+6. **Post-Setup Commands** (Optional) - Start containers and run Laravel setup
 
 ### Commands
 
@@ -89,12 +90,13 @@ Shipyard maintains a global registry at `~/.config/shipyard/projects.conf` that 
 path=/path/to/project
 domain=my-project.test
 proxy_service=valet
+proxy_secure=true
 APP_PORT=8000
 VITE_PORT=5100
 FORWARD_DB_PORT=3300
 ```
 
-The `domain` and `proxy_service` fields are optional and only present if you registered a local domain through Valet or Herd.
+The `domain`, `proxy_service`, and `proxy_secure` fields are optional and only present if you registered a local domain through Valet or Herd. The `proxy_secure` field indicates whether HTTPS (`true`) or HTTP (`false`) was configured.
 
 ### Port Assignment Strategy
 
@@ -126,18 +128,33 @@ The `domain` and `proxy_service` fields are optional and only present if you reg
 If you have Valet or Herd installed, Shipyard can:
 
 1. **Register Proxy** - Creates a proxy: `myproject.test` → `http://localhost:8000`
-2. **SSL Certificates** - Automatically generates SSL certificate via `--secure` flag
-3. **Symlink Certificates** - Creates symlinks in `certificates/` directory:
+2. **Choose Protocol** - Select between HTTPS (with SSL) or HTTP (without SSL)
+
+#### HTTPS Mode (Recommended)
+
+When you choose HTTPS:
+
+1. **SSL Certificates** - Automatically generates SSL certificate via `--secure` flag
+2. **Symlink Certificates** - Creates symlinks in `certificates/` directory:
    - `certificates/cert.crt` → Valet/Herd certificate
    - `certificates/cert.key` → Valet/Herd private key
-4. **Update APP_URL** - Sets `APP_URL=https://myproject.test` in `.env`
-5. **Update .gitignore** - Adds `/certificates` to `.gitignore`
+3. **Update APP_URL** - Sets `APP_URL=https://myproject.test` in `.env`
+4. **Update .gitignore** - Adds `/certificates` to `.gitignore`
 
 **Result:** Access your app via `https://myproject.test` with valid SSL certificate.
 
+#### HTTP Mode
+
+When you choose HTTP:
+
+1. **Non-Secure Proxy** - Creates proxy without SSL certificates
+2. **Update APP_URL** - Sets `APP_URL=http://myproject.test` in `.env`
+
+**Result:** Access your app via `http://myproject.test` (no SSL certificate needed).
+
 ### Using SSL Certificates with Vite Dev Server
 
-When you register a domain with SSL, Shipyard creates certificate symlinks in the `certificates/` directory and automatically adds `/certificates` to your `.gitignore` file. To use these certificates with Vite's dev server inside your Sail container:
+When you register a domain with HTTPS mode, Shipyard creates certificate symlinks in the `certificates/` directory and automatically adds `/certificates` to your `.gitignore` file. To use these certificates with Vite's dev server inside your Sail container:
 
 #### 1. Mount Certificates in Docker Compose
 
@@ -195,10 +212,10 @@ export default defineConfig(({ mode }) => {
             hmr: {
                 host: env.VITE_SERVER_HOST,
             },
-            https: {
+            https: fs.existsSync('/var/www/certificates/cert.key') && fs.existsSync('/var/www/certificates/cert.crt') ? {
                 key: fs.readFileSync('/var/www/certificates/cert.key'),
                 cert: fs.readFileSync('/var/www/certificates/cert.crt'),
-            }
+            } : null,
         } : null,
     };
 });
@@ -206,7 +223,7 @@ export default defineConfig(({ mode }) => {
 
 #### 3. Environment Configuration
 
-When Shipyard registers a domain with SSL, it automatically updates your `.env` file:
+When Shipyard registers a domain (with or without HTTPS mode), it automatically updates your `.env` file:
 
 ```bash
 APP_URL=https://myproject.test
@@ -215,9 +232,10 @@ ASSET_URL="${APP_URL}"
 ```
 
 **How it works:**
-- When `VITE_SERVER_HOST` is set to your domain (not `localhost`), Vite uses HTTPS with the mounted certificates
+- When `VITE_SERVER_HOST` is set to your domain (not `localhost`), Vite uses that domain as its host
+- When SSL certificates are available, Vite uses HTTPS with the mounted certificates
 - Hot Module Replacement (HMR) connects via `wss://myproject.test`
-- Assets are served with valid SSL certificates
+- Assets are served on the correct domain (with valid SSL certificates)
 
 #### 4. Start Development
 

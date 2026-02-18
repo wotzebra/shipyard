@@ -71,6 +71,7 @@ REGISTERED_DOMAIN=""
 SELECTED_DEV_TOOL=""  # "valet" or "herd"
 VALET_AVAILABLE=false
 HERD_AVAILABLE=false
+USE_SECURE_PROXY=true  # Whether to use --secure flag for HTTPS
 
 # User input collection (collected upfront)
 declare -a COMPOSER_REPO_USERNAMES=()
@@ -956,6 +957,7 @@ run_list_command() {
         local path_var="registry_${project_sanitized}_path"
         local domain_var="registry_${project_sanitized}_domain"
         local proxy_var="registry_${project_sanitized}_proxy_service"
+        local proxy_secure_var="registry_${project_sanitized}_proxy_secure"
 
         echo -e "${BOLD}${project}${NC}"
         
@@ -971,7 +973,18 @@ run_list_command() {
         # Show domain if available
         if [ -n "${!domain_var:-}" ]; then
             local proxy_service="${!proxy_var:-unknown}"
-            echo "  Domain: ${!domain_var} (${proxy_service})"
+            local proxy_secure="${!proxy_secure_var:-}"
+            
+            if [ -n "$proxy_secure" ]; then
+                local protocol="https"
+                if [ "$proxy_secure" = "false" ]; then
+                    protocol="http"
+                fi
+                echo "  Domain: ${protocol}://${!domain_var} (${proxy_service})"
+            else
+                # No proxy_secure field, just show domain without protocol
+                echo "  Domain: ${!domain_var} (${proxy_service})"
+            fi
         fi
         
         # Show all port variables dynamically
@@ -1057,6 +1070,7 @@ save_registry() {
         if [ "$DOMAIN_REGISTERED" = true ]; then
             echo "domain=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
             echo "proxy_service=$SELECTED_DEV_TOOL"
+            echo "proxy_secure=$USE_SECURE_PROXY"
         fi
 
         # Write port assignments in sorted order
@@ -1295,9 +1309,19 @@ register_domain_with_tool() {
 
     log_info "Registering proxy: $full_domain -> $proxy_target"
 
-    # Run the proxy command with --secure flag
-    if $SELECTED_DEV_TOOL proxy "$domain" "$proxy_target" --secure >/dev/null 2>&1; then
-        log_success "Proxy created with SSL certificate"
+    # Build proxy command with optional --secure flag
+    local proxy_cmd="$SELECTED_DEV_TOOL proxy \"$domain\" \"$proxy_target\""
+    if [ "$USE_SECURE_PROXY" = true ]; then
+        proxy_cmd="$proxy_cmd --secure"
+    fi
+
+    # Run the proxy command
+    if eval "$proxy_cmd" >/dev/null 2>&1; then
+        if [ "$USE_SECURE_PROXY" = true ]; then
+            log_success "Proxy created with SSL certificate"
+        else
+            log_success "Proxy created (HTTP)"
+        fi
         return 0
     else
         log_error "$SELECTED_DEV_TOOL proxy command failed"
@@ -1325,12 +1349,24 @@ prompt_domain_registration() {
 
     log_info "Registering proxy: $full_domain -> $proxy_target"
 
-    # Run the proxy command with --secure flag
-    if $SELECTED_DEV_TOOL proxy "$domain" "$proxy_target" --secure >/dev/null 2>&1; then
+    # Build proxy command with optional --secure flag
+    local proxy_cmd="$SELECTED_DEV_TOOL proxy \"$domain\" \"$proxy_target\""
+    if [ "$USE_SECURE_PROXY" = true ]; then
+        proxy_cmd="$proxy_cmd --secure"
+    fi
+
+    # Run the proxy command
+    if eval "$proxy_cmd" >/dev/null 2>&1; then
         DOMAIN_REGISTERED=true
         REGISTERED_DOMAIN="$domain"
-        log_success "Proxy created with SSL certificate"
-        log_success "Domain registered: https://$domain.$DOMAIN_TLD"
+        
+        if [ "$USE_SECURE_PROXY" = true ]; then
+            log_success "Proxy created with SSL certificate"
+            log_success "Domain registered: https://$domain.$DOMAIN_TLD"
+        else
+            log_success "Proxy created (HTTP)"
+            log_success "Domain registered: http://$domain.$DOMAIN_TLD"
+        fi
         return 0
     else
         log_error "$SELECTED_DEV_TOOL proxy command failed"
@@ -1380,6 +1416,12 @@ symlink_certificates() {
         return 0
     fi
 
+    # Skip certificate handling if not using secure proxy
+    if [ "$USE_SECURE_PROXY" = false ]; then
+        log_info "Skipping SSL certificate setup (HTTP mode)"
+        return 0
+    fi
+
     # Find certificates
     if ! find_ssl_certificates "$REGISTERED_DOMAIN" "$SELECTED_DEV_TOOL"; then
         log_error "Could not find SSL certificates. You may need to run:"
@@ -1414,6 +1456,11 @@ symlink_certificates() {
 
 update_gitignore_for_certs() {
     if [ "$DOMAIN_REGISTERED" = false ]; then
+        return 0
+    fi
+
+    # Skip if not using secure proxy
+    if [ "$USE_SECURE_PROXY" = false ]; then
         return 0
     fi
 
@@ -1598,6 +1645,32 @@ collect_user_input() {
                 # Domain is valid and available
                 USER_DOMAIN_NAME="$domain"
                 log_success "Domain name validated: ${CYAN}$domain.$DOMAIN_TLD${NC}"
+                
+                # Ask about HTTPS/HTTP preference
+                echo ""
+                echo -e "${BOLD}SSL/HTTPS Configuration${NC}"
+                echo -e "${DIM}Do you want to use HTTPS (secure) or HTTP (non-secure)?${NC}"
+                echo -e "  ${CYAN}[1]${NC} HTTPS (Recommended) - Uses SSL certificates"
+                echo -e "  ${CYAN}[2]${NC} HTTP - No SSL certificates"
+                echo -n "Select option [1]: "
+                read -r ssl_choice
+                ssl_choice=${ssl_choice:-1}
+                
+                case $ssl_choice in
+                    1)
+                        USE_SECURE_PROXY=true
+                        log_success "Selected: HTTPS (secure)"
+                        ;;
+                    2)
+                        USE_SECURE_PROXY=false
+                        log_success "Selected: HTTP (non-secure)"
+                        ;;
+                    *)
+                        echo -e "${YELLOW}Invalid selection. Defaulting to HTTPS.${NC}"
+                        USE_SECURE_PROXY=true
+                        ;;
+                esac
+                
                 break
             done
         else
@@ -1629,7 +1702,11 @@ collect_user_input() {
         echo -e "  ${DIM}•${NC} Private repositories: ${BOLD}${#COMPOSER_REPO_USERNAMES[@]}${NC} configured"
     fi
     if [ "$REGISTER_DOMAIN" = true ]; then
-        echo -e "  ${DIM}•${NC} Domain: ${CYAN}$USER_DOMAIN_NAME.$DOMAIN_TLD${NC} (via $SELECTED_DEV_TOOL)"
+        if [ "$USE_SECURE_PROXY" = true ]; then
+            echo -e "  ${DIM}•${NC} Domain: ${CYAN}https://$USER_DOMAIN_NAME.$DOMAIN_TLD${NC} (via $SELECTED_DEV_TOOL)"
+        else
+            echo -e "  ${DIM}•${NC} Domain: ${CYAN}http://$USER_DOMAIN_NAME.$DOMAIN_TLD${NC} (via $SELECTED_DEV_TOOL)"
+        fi
     else
         echo -e "  ${DIM}•${NC} Domain: ${DIM}Not configured${NC}"
     fi
@@ -1644,7 +1721,11 @@ collect_user_input() {
     echo -e "  ${DIM}2.${NC} Update .env file with port assignments"
     echo -e "  ${DIM}3.${NC} Register project in Shipyard registry"
     if [ "$REGISTER_DOMAIN" = true ]; then
-        echo -e "  ${DIM}4.${NC} Configure local domain and SSL certificates"
+        if [ "$USE_SECURE_PROXY" = true ]; then
+            echo -e "  ${DIM}4.${NC} Configure local domain and SSL certificates"
+        else
+            echo -e "  ${DIM}4.${NC} Configure local domain (HTTP)"
+        fi
     fi
     if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
         echo -e "  ${DIM}5.${NC} Start Docker containers and run Laravel setup"
