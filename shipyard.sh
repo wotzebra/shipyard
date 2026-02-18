@@ -138,16 +138,19 @@ show_version() {
 }
 
 show_help() {
-    cat << EOF
-Shipyard v$VERSION - Laravel Sail Project Setup
+    show_title
+    echo ""
 
+    cat << EOF
 Usage:
   shipyard init         Initialize a Laravel Sail project
+  shipyard cleanup      Clean up Docker resources and stale projects
   shipyard [options]
 
 Commands:
   init                  Set up the Laravel Sail project in current directory
                         (automatic port assignment, domain configuration, etc.)
+  cleanup               Clean up stale projects from registry
 
 Options:
   --version, -v         Show version
@@ -156,6 +159,7 @@ Options:
 
 Examples:
   shipyard init         # Set up project in current directory
+  shipyard cleanup      # Clean up Docker resources and stale projects
   shipyard --update     # Update Shipyard to latest version
 
 Features:
@@ -347,6 +351,11 @@ parse_arguments() {
         init)
             # Run main setup
             return 0
+            ;;
+        cleanup)
+            # Run cleanup command
+            run_cleanup_command
+            exit 0
             ;;
         --version|-v)
             show_version
@@ -882,6 +891,35 @@ cleanup_stale_projects() {
     fi
 
     log_success "Cleaned up $removed_count stale project(s)"
+    echo ""
+}
+
+run_cleanup_command() {
+    # Dedicated cleanup command - cleans up stale projects from registry
+    show_title
+    echo ""
+
+    echo ""
+    validate_docker
+
+    echo ""
+    log_info "Starting Shipyard cleanup..."
+    echo ""
+
+    # Parse registry file first
+    parse_ini_file
+
+    # Clean up stale projects from registry
+    if [ ${#REGISTRY_PROJECTS[@]} -eq 0 ]; then
+        log_info "No registered projects found"
+        echo ""
+    else
+        log_info "Found ${#REGISTRY_PROJECTS[@]} registered project(s)"
+        echo ""
+        cleanup_stale_projects
+    fi
+
+    log_success "Cleanup complete!"
     echo ""
 }
 
