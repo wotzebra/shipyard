@@ -556,11 +556,46 @@ extract_composer_repositories() {
     grep -A 2 '"type".*"composer"' composer.json | grep '"url"' | sed -E 's/.*"url"[[:space:]]*:[[:space:]]*"https?:\/\/([^"]+)".*/\1/'
 }
 
+detect_php_version() {
+    # Detect PHP version from docker-compose.yml
+    # Looks for patterns like: ./vendor/laravel/sail/runtimes/8.4 or sail-8.4/app
+    local php_version=""
+    
+    if [ ! -f "$COMPOSE_FILE" ]; then
+        log_warning "docker-compose.yml not found, defaulting to PHP 8.4"
+        echo "84"
+        return
+    fi
+    
+    # Try to extract version from context path (e.g., ./vendor/laravel/sail/runtimes/8.4)
+    php_version=$(grep -E 'context:.*runtimes/[0-9]+\.[0-9]+' "$COMPOSE_FILE" | sed -E 's/.*runtimes\/([0-9]+)\.([0-9]+).*/\1\2/' | head -n 1)
+    
+    # If not found, try to extract from image name (e.g., sail-8.4/app)
+    if [ -z "$php_version" ]; then
+        php_version=$(grep -E 'image:.*sail-[0-9]+\.[0-9]+' "$COMPOSE_FILE" | sed -E 's/.*sail-([0-9]+)\.([0-9]+).*/\1\2/' | head -n 1)
+    fi
+    
+    # Default to 8.4 if not found
+    if [ -z "$php_version" ]; then
+        log_warning "Could not detect PHP version from docker-compose.yml, defaulting to PHP 8.4"
+        echo "84"
+    else
+        echo "$php_version"
+    fi
+}
+
 run_composer_install() {
     echo ""
     log_info "=========================================="
     log_info "Installing Composer dependencies..."
     log_info "=========================================="
+    echo ""
+
+    # Detect PHP version from docker-compose.yml
+    local php_version=$(detect_php_version)
+    local composer_image="laravelsail/php${php_version}-composer:latest"
+    
+    log_info "Using PHP ${php_version:0:1}.${php_version:1} composer image: $composer_image"
     echo ""
 
     # Extract repositories from composer.json
@@ -569,7 +604,7 @@ run_composer_install() {
     if [ ${#repositories[@]} -eq 0 ]; then
         log_info "No private repositories found in composer.json, running composer install..."
         echo ""
-        docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w /var/www/html laravelsail/php84-composer:latest composer install --ignore-platform-reqs
+        docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w /var/www/html "$composer_image" composer install --ignore-platform-reqs
 
         if [ $? -ne 0 ]; then
             echo ""
@@ -611,14 +646,14 @@ run_composer_install() {
 
     local full_command="$config_commands && composer install --ignore-platform-reqs"
 
-    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w /var/www/html laravelsail/php84-composer:latest bash -c "$full_command"
+    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w /var/www/html "$composer_image" bash -c "$full_command"
 
     if [ $? -ne 0 ]; then
         echo ""
         log_error "Composer install failed. Please check your credentials and try again."
         echo ""
         echo "Command that failed:"
-        echo "  docker run --rm -u \"\$(id -u):\$(id -g)\" -v \$(pwd):/var/www/html -w /var/www/html laravelsail/php84-composer:latest bash -c \"$config_commands && composer install --ignore-platform-reqs\""
+        echo "  docker run --rm -u \"\$(id -u):\$(id -g)\" -v \$(pwd):/var/www/html -w /var/www/html $composer_image bash -c \"$config_commands && composer install --ignore-platform-reqs\""
         exit 9
     fi
 
