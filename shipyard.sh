@@ -414,11 +414,11 @@ Please start Docker Desktop and try again."
 check_docker_networks() {
     # Check for Docker network address pool exhaustion
     # This is a common issue when too many unused networks exist
-    
+
     # Count total bridge networks (excluding default bridge)
     local total_networks
     total_networks=$(docker network ls --filter "driver=bridge" --format "{{.Name}}" 2>/dev/null | grep -v "^bridge$" | wc -l | tr -d ' ')
-    
+
     # If there are many networks, check if cleanup might help
     if [ "$total_networks" -gt 20 ]; then
         echo ""
@@ -432,15 +432,15 @@ check_docker_networks() {
         echo ""
         echo "  Cleaning up unused Docker networks can help prevent this issue."
         echo ""
-        
+
         read -r -p "Would you like to clean up unused networks now? [y/N] " response
-        
+
         if [[ "$response" =~ ^[Yy]$ ]]; then
             echo ""
             log_info "Cleaning up unused Docker networks..."
             local before_count
             before_count=$(docker network ls --filter "driver=bridge" --format "{{.Name}}" 2>/dev/null | grep -v "^bridge$" | wc -l | tr -d ' ')
-            
+
             if docker network prune -f >/dev/null 2>&1; then
                 local after_count
                 after_count=$(docker network ls --filter "driver=bridge" --format "{{.Name}}" 2>/dev/null | grep -v "^bridge$" | wc -l | tr -d ' ')
@@ -732,6 +732,33 @@ cleanup_stale_projects() {
                 else
                     log_info "    ! Failed to remove proxy (may have been already removed)"
                 fi
+            fi
+
+            # Clean up Sail volumes if they exist
+            # Use the project name (from square brackets) as the compose project name
+            log_info "    Checking for Sail volumes to clean up..."
+
+            # Find all volumes matching the pattern: project_sail-*
+            local sail_volumes=$(docker volume ls --format "{{.Name}}" 2>/dev/null | grep "^${project}_sail-" || true)
+
+            if [ -n "$sail_volumes" ]; then
+                local volume_count=0
+                while IFS= read -r volume_name; do
+                    if [ -n "$volume_name" ]; then
+                        if docker volume rm "$volume_name" >/dev/null 2>&1; then
+                            log_info "    ✓ Removed volume: $volume_name"
+                            volume_count=$((volume_count + 1))
+                        else
+                            log_info "    ! Failed to remove volume: $volume_name (may be in use)"
+                        fi
+                    fi
+                done <<< "$sail_volumes"
+
+                if [ $volume_count -gt 0 ]; then
+                    log_info "    ✓ Removed $volume_count Sail volume(s)"
+                fi
+            else
+                log_info "    No Sail volumes found"
             fi
 
             removed_count=$((removed_count + 1))
