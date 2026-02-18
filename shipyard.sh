@@ -64,7 +64,6 @@ declare -A PORT_ASSIGNMENTS=()
 
 # Project state
 PROJECT_NAME=""
-COMPOSE_PROJECT_NAME_NEEDS_ADDING=false
 
 # Domain registration state
 DOMAIN_REGISTERED=false
@@ -735,7 +734,7 @@ cleanup_stale_projects() {
             fi
 
             # Clean up Sail volumes if they exist
-            # Use the project name (from square brackets) as the compose project name
+            # The project name is already normalized (lowercase, valid Docker Compose format)
             log_info "    Checking for Sail volumes to clean up..."
 
             # Find all volumes matching the pattern: project_sail-*
@@ -1001,27 +1000,19 @@ This is extremely rare. Please check your system's port usage."
 # ==============================================================================
 
 get_project_name() {
-    # Read COMPOSE_PROJECT_NAME from .env
-    if [ -f "$ENV_FILE" ]; then
-        local value=$(grep -E "^COMPOSE_PROJECT_NAME=" "$ENV_FILE" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
-        echo "$value"
-    fi
+    # Generate project name from full path
+    # Always normalize to valid Docker Compose format (lowercase, alphanumeric + underscores)
+    # Remove leading slash, then replace all non-alphanumeric chars with underscores, convert to lowercase
+    echo "$PWD" | sed 's|^/||' | sed 's/[^a-zA-Z0-9]/_/g' | tr '[:upper:]' '[:lower:]'
 }
 
 ensure_compose_project_name() {
+    # Generate normalized project name
     local project_name=$(get_project_name)
-
-    if [ -z "$project_name" ]; then
-        # Generate from full path with all special chars replaced by underscores
-        # Remove leading slash, then replace all non-alphanumeric chars with underscores
-        project_name=$(echo "$PWD" | sed 's|^/||' | sed 's/[^a-zA-Z0-9]/_/g')
-        COMPOSE_PROJECT_NAME_NEEDS_ADDING=true
-    else
-        COMPOSE_PROJECT_NAME_NEEDS_ADDING=false
-    fi
 
     # Set global PROJECT_NAME variable
     PROJECT_NAME="$project_name"
+}
 }
 
 # ==============================================================================
@@ -1035,10 +1026,8 @@ append_ports_to_env() {
         # Add header comment at the top
         echo "# Auto-assigned Docker Ports (via shipyard.sh)"
 
-        # Add COMPOSE_PROJECT_NAME if we generated it
-        if [ "$COMPOSE_PROJECT_NAME_NEEDS_ADDING" = true ]; then
-            echo "COMPOSE_PROJECT_NAME=$PROJECT_NAME"
-        fi
+        # Always add COMPOSE_PROJECT_NAME (normalized from path)
+        echo "COMPOSE_PROJECT_NAME=$PROJECT_NAME"
 
         # Add APP_URL based on domain registration or APP_PORT
         if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
@@ -1062,10 +1051,13 @@ append_ports_to_env() {
         # Add blank line separator
         echo ""
 
-        # Copy existing .env content, but remove APP_URL, ASSET_URL, and VITE_SERVER_HOST if they exist
+        # Copy existing .env content, but skip COMPOSE_PROJECT_NAME, APP_URL, ASSET_URL, and VITE_SERVER_HOST
         while IFS= read -r line; do
-            # Skip APP_URL, ASSET_URL, and VITE_SERVER_HOST lines (we added them at top)
-            if [[ ! "$line" =~ ^APP_URL= ]] && [[ ! "$line" =~ ^ASSET_URL= ]] && [[ ! "$line" =~ ^VITE_SERVER_HOST= ]]; then
+            # Skip lines we're managing at the top
+            if [[ ! "$line" =~ ^COMPOSE_PROJECT_NAME= ]] && \
+               [[ ! "$line" =~ ^APP_URL= ]] && \
+               [[ ! "$line" =~ ^ASSET_URL= ]] && \
+               [[ ! "$line" =~ ^VITE_SERVER_HOST= ]]; then
                 echo "$line"
             fi
         done < "$ENV_FILE"
