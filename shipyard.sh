@@ -35,6 +35,7 @@ readonly EXIT_ALREADY_REGISTERED=8
 readonly EXIT_REGISTRY_CORRUPTED=9
 readonly EXIT_DOCKER_NOT_INSTALLED=10
 readonly EXIT_DOCKER_NOT_RUNNING=11
+readonly EXIT_ENV_ALREADY_CONFIGURED=12
 readonly EXIT_USER_CANCELLED=130
 
 # File paths
@@ -659,6 +660,18 @@ run_composer_install() {
 
     log_success "Composer dependencies installed"
     echo ""
+}
+
+check_env_already_initialized() {
+    # Check if .env file exists
+    if [ -f "$ENV_FILE" ]; then
+        exit_with_error $EXIT_ENV_ALREADY_CONFIGURED \
+            ".env file already exists in this project.
+
+File: $ENV_FILE
+
+To run 'shipyard init', please remove or rename the .env file first."
+    fi
 }
 
 check_env_for_ports() {
@@ -1829,32 +1842,36 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     fi
     log_success "Project not yet registered"
 
-    # Step 4: Validate Docker is installed and running
+    # Step 4: Check if .env file already exists (fail fast!)
+    check_env_already_initialized
+    log_success ".env file does not exist yet"
+
+    # Step 5: Validate Docker is installed and running
     validate_docker
 
-    # Step 5: Check for Docker network issues
+    # Step 6: Check for Docker network issues
     check_docker_networks
 
-    # Step 6: Validate docker-compose.yml exists
+    # Step 7: Validate docker-compose.yml exists
     validate_docker_compose
 
-    # Step 7: Collect all user input upfront
+    # Step 8: Collect all user input upfront
     collect_user_input
 
-    # Step 8: Run composer install (non-interactive)
+    # Step 9: Run composer install (non-interactive)
     run_composer_install
 
-    # Step 9: Validate/create .env file
+    # Step 10: Validate/create .env file
     validate_env_file
 
-    # Step 10: Check .env for existing port definitions
+    # Step 11: Check .env for existing port definitions
     check_env_for_ports
 
-    # Step 11: Acquire lock on registry
+    # Step 12: Acquire lock on registry
     acquire_lock
     log_success "Acquired registry lock"
 
-    # Step 12: Reload registry and clean up stale projects (now with lock held)
+    # Step 13: Reload registry and clean up stale projects (now with lock held)
     # Note: We already loaded the registry earlier for the duplicate check,
     # but we need to reload it here with the lock to ensure we have the latest state
     parse_ini_file
@@ -1867,7 +1884,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         log_success "Registry is empty (first project)"
     fi
 
-    # Step 13: Extract port variables from docker-compose.yml
+    # Step 14: Extract port variables from docker-compose.yml
     local port_vars_output=$(extract_port_vars)
     readarray -t port_vars_array <<< "$port_vars_output"
     local num_port_vars=${#port_vars_array[@]}
@@ -1876,7 +1893,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     echo ""
     log_info "Assigning ports:"
 
-    # Step 14: Assign ports
+    # Step 15: Assign ports
     for port_var in "${port_vars_array[@]}"; do
         local var_name="${port_var%:*}"
         local default_port="${port_var#*:}"
@@ -1900,7 +1917,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
 
     echo ""
 
-    # Step 15: Domain registration (non-interactive)
+    # Step 16: Domain registration (non-interactive)
     if [ "$REGISTER_DOMAIN" = true ]; then
         prompt_domain_registration
 
@@ -1922,11 +1939,11 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         echo ""
     fi
 
-    # Step 16: Save registry
+    # Step 17: Save registry
     save_registry
     log_success "Updated registry: $REGISTRY_FILE"
 
-    # Step 17: Append to .env
+    # Step 18: Append to .env
     append_ports_to_env
 
     # Build success message with APP_URL info
@@ -1942,14 +1959,14 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     fi
     log_success "$success_msg"
 
-    # Step 18: Release lock
+    # Step 19: Release lock
     release_lock
 
     # Success message
     echo ""
     log_success "Project setup complete! Assigned $num_port_vars ports to '$PROJECT_NAME'."
 
-    # Step 19: Run post-setup commands (non-interactive)
+    # Step 20: Run post-setup commands (non-interactive)
     if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
         echo ""
         echo "=========================================="
