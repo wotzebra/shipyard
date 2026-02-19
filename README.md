@@ -148,9 +148,20 @@ When you choose HTTPS:
 When you choose HTTP:
 
 1. **Non-Secure Proxy** - Creates proxy without SSL certificates
-2. **Update APP_URL** - Sets `APP_URL=http://myproject.test` in `.env`
+2. **Create Empty Certificates** - Creates empty `cert.key` and `cert.crt` files in `certificates/` directory
+3. **Update APP_URL** - Sets `APP_URL=http://myproject.test` in `.env`
+4. **Update .gitignore** - Adds `/certificates` to `.gitignore`
 
 **Result:** Access your app via `http://myproject.test` (no SSL certificate needed).
+
+#### No Domain
+
+When you choose not to register a domain:
+
+1. **Create Empty Certificates** - Creates empty `cert.key` and `cert.crt` files in `certificates/` directory
+2. **Update .gitignore** - Adds `/certificates` to `.gitignore`
+
+**Result:** Empty certificate files are created to prevent Docker mount errors. Access your app via `http://localhost:8000`.
 
 ### Using SSL Certificates with Vite Dev Server
 
@@ -200,16 +211,20 @@ export default defineConfig(({ mode }) => {
             }),
             tailwindcss(),
         ],
-        server: env.VITE_SERVER_HOST !== 'localhost' ? {
-            host: env.VITE_SERVER_HOST,
-            hmr: {
+        ...(env.VITE_SERVER_HOST !== 'localhost' && {
+            server: {
                 host: env.VITE_SERVER_HOST,
+                hmr: {
+                    host: env.VITE_SERVER_HOST,
+                },
+                ...(fs.existsSync('/var/www/certificates/cert.key') && fs.existsSync('/var/www/certificates/cert.crt') && fs.statSync('/var/www/certificates/cert.key').size > 0 && fs.statSync('/var/www/certificates/cert.crt').size > 0 && {
+                    https: {
+                        key: fs.readFileSync('/var/www/certificates/cert.key'),
+                        cert: fs.readFileSync('/var/www/certificates/cert.crt'),
+                    },
+                }),
             },
-            https: fs.existsSync('/var/www/certificates/cert.key') && fs.existsSync('/var/www/certificates/cert.crt') ? {
-                key: fs.readFileSync('/var/www/certificates/cert.key'),
-                cert: fs.readFileSync('/var/www/certificates/cert.crt'),
-            } : null,
-        } : null,
+        }),
     };
 });
 ```

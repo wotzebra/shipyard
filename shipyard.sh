@@ -560,21 +560,21 @@ detect_php_version() {
     # Detect PHP version from docker-compose.yml
     # Looks for patterns like: ./vendor/laravel/sail/runtimes/8.4 or sail-8.4/app
     local php_version=""
-    
+
     if [ ! -f "$COMPOSE_FILE" ]; then
         log_warning "docker-compose.yml not found, defaulting to PHP 8.4"
         echo "84"
         return
     fi
-    
+
     # Try to extract version from context path (e.g., ./vendor/laravel/sail/runtimes/8.4)
     php_version=$(grep -E 'context:.*runtimes/[0-9]+\.[0-9]+' "$COMPOSE_FILE" | sed -E 's/.*runtimes\/([0-9]+)\.([0-9]+).*/\1\2/' | head -n 1)
-    
+
     # If not found, try to extract from image name (e.g., sail-8.4/app)
     if [ -z "$php_version" ]; then
         php_version=$(grep -E 'image:.*sail-[0-9]+\.[0-9]+' "$COMPOSE_FILE" | sed -E 's/.*sail-([0-9]+)\.([0-9]+).*/\1\2/' | head -n 1)
     fi
-    
+
     # Default to 8.4 if not found
     if [ -z "$php_version" ]; then
         log_warning "Could not detect PHP version from docker-compose.yml, defaulting to PHP 8.4"
@@ -594,7 +594,7 @@ run_composer_install() {
     # Detect PHP version from docker-compose.yml
     local php_version=$(detect_php_version)
     local composer_image="laravelsail/php${php_version}-composer:latest"
-    
+
     log_info "Using PHP ${php_version:0:1}.${php_version:1} composer image: $composer_image"
     echo ""
 
@@ -995,7 +995,7 @@ run_list_command() {
         local proxy_secure_var="registry_${project_sanitized}_proxy_secure"
 
         echo -e "${BOLD}${project}${NC}"
-        
+
         # Show path
         if [ -n "${!path_var:-}" ]; then
             echo "  Path:   ${!path_var}"
@@ -1004,12 +1004,12 @@ run_list_command() {
                 echo -e "  ${YELLOW}⚠ Path no longer exists${NC}"
             fi
         fi
-        
+
         # Show domain if available
         if [ -n "${!domain_var:-}" ]; then
             local proxy_service="${!proxy_var:-unknown}"
             local proxy_secure="${!proxy_secure_var:-}"
-            
+
             if [ -n "$proxy_secure" ]; then
                 local protocol="https"
                 if [ "$proxy_secure" = "false" ]; then
@@ -1021,7 +1021,7 @@ run_list_command() {
                 echo "  Domain: ${!domain_var} (${proxy_service})"
             fi
         fi
-        
+
         # Show all port variables dynamically
         local ports=()
         while IFS= read -r varname; do
@@ -1033,14 +1033,14 @@ run_list_command() {
                 fi
             fi
         done < <(compgen -v "registry_${project_sanitized}_")
-        
+
         if [ ${#ports[@]} -gt 0 ]; then
             echo "  Ports:"
             for port_info in "${ports[@]}"; do
                 echo "    ${port_info}"
             done
         fi
-        
+
         echo ""
     done
 
@@ -1398,7 +1398,7 @@ prompt_domain_registration() {
     if eval "$proxy_cmd" >/dev/null 2>&1; then
         DOMAIN_REGISTERED=true
         REGISTERED_DOMAIN="$domain"
-        
+
         if [ "$USE_SECURE_PROXY" = true ]; then
             log_success "Proxy created with SSL certificate"
             log_success "Domain registered: https://$domain.$DOMAIN_TLD"
@@ -1458,12 +1458,29 @@ symlink_certificates() {
     fi
 
     if [ "$DOMAIN_REGISTERED" = false ]; then
+        # Create empty certificate files when no domain is registered
+        local target_cert="${PROJECT_CERT_DIR}/cert.crt"
+        local target_key="${PROJECT_CERT_DIR}/cert.key"
+
+        touch "$target_cert"
+        touch "$target_key"
+
+        log_success "Created empty certificate files (no domain registered)"
         return 0
     fi
 
     # Skip SSL certificate setup if using HTTP mode
     if [ "$USE_SECURE_PROXY" = false ]; then
         log_info "Skipping SSL certificate setup (HTTP mode)"
+
+        # Create empty certificate files for HTTP mode
+        local target_cert="${PROJECT_CERT_DIR}/cert.crt"
+        local target_key="${PROJECT_CERT_DIR}/cert.key"
+
+        touch "$target_cert"
+        touch "$target_key"
+
+        log_success "Created empty certificate files for HTTP mode"
         return 0
     fi
 
@@ -1675,7 +1692,7 @@ collect_user_input() {
                 # Domain is valid and available
                 USER_DOMAIN_NAME="$domain"
                 log_success "Domain name validated: ${CYAN}$domain.$DOMAIN_TLD${NC}"
-                
+
                 # Ask about HTTPS/HTTP preference
                 echo ""
                 echo -e "${BOLD}SSL/HTTPS Configuration${NC}"
@@ -1685,7 +1702,7 @@ collect_user_input() {
                 echo -n "Select option [1]: "
                 read -r ssl_choice
                 ssl_choice=${ssl_choice:-1}
-                
+
                 case $ssl_choice in
                     1)
                         USE_SECURE_PROXY=true
@@ -1700,7 +1717,7 @@ collect_user_input() {
                         USE_SECURE_PROXY=true
                         ;;
                 esac
-                
+
                 break
             done
         else
@@ -1895,6 +1912,12 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         fi
     else
         log_info "Domain registration skipped (as per user preference)"
+        echo ""
+
+        # Still create empty certificate files even without domain
+        log_info "Setting up certificate files..."
+        symlink_certificates
+        update_gitignore_for_certs
         echo ""
     fi
 
