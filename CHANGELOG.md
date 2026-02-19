@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-02-19
+
+### Changed
+- `init` command now stops immediately if the directory is already registered as a project in shipyard
+- `init` command now stops if a `.env` file already exists in the project directory
+
 ## [0.3.1] - 2026-02-19
 
 ### Changed
