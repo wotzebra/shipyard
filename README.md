@@ -169,14 +169,19 @@ When you register a domain with HTTPS mode, Shipyard creates certificate symlink
 
 #### 1. Mount Certificates in Docker Compose
 
-Add the certificates volume mount to your `docker-compose.yml`:
+Add the certificates volume mounts to your `docker-compose.yml`:
 
 ```yaml
 services:
     laravel.test:
-        - type: bind
-              source: './certificates'
-              target: /var/www/certificates
+        volumes:
+            - type: bind
+              source: './certificates/cert.key'
+              target: /var/www/certificates/cert.key
+              read_only: true
+            - type: bind
+              source: './certificates/cert.crt'
+              target: /var/www/certificates/cert.crt
               read_only: true
 ```
 

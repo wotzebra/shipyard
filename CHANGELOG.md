@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-02-19
+
+### Changed
+- Composer installation now detects and uses the correct PHP version from docker-compose.yml configuration
+
+### Fixed
+- Prevent Docker mount errors by creating empty certificate files as placeholders if there are no certificates (because user chose no domain or chose a domain without https)
+
 ## [0.3.0] - 2026-02-18
 
 ### Added
