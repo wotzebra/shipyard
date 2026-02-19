@@ -437,7 +437,7 @@ acquire_lock() {
 
     # Timeout reached
     exit_with_error $EXIT_LOCK_TIMEOUT \
-        "Failed to acquire lock after ${LOCK_TIMEOUT}s. Another process may be using the port registry."
+        "Failed to acquire lock after ${LOCK_TIMEOUT}s. Another process may be using the project registry."
 }
 
 release_lock() {
@@ -1811,44 +1811,14 @@ main() {
     log_info "(Press Ctrl+C at any time to cancel)"
     echo ""
 
-    # Step 1: Validate Docker is installed and running
-    validate_docker
-
-    # Step 2: Check for Docker network issues
-    check_docker_networks
-
-    # Step 3: Validate docker-compose.yml exists
-    validate_docker_compose
-
-    # Step 4: Collect all user input upfront
-    collect_user_input
-
-    # Step 5: Run composer install (non-interactive)
-    run_composer_install
-
-    # Step 6: Validate/create .env file
-    validate_env_file
-
-    # Step 7: Check .env for existing port definitions
-    check_env_for_ports
-
-    # Step 8: Acquire lock on registry
-    acquire_lock
-    log_success "Acquired registry lock"
-
-    # Step 9: Get or generate project name (if not already set during input collection)
-    if [ -z "$PROJECT_NAME" ]; then
-        ensure_compose_project_name
-    fi
+    # Step 1: Get project name and check if already registered (fail fast!)
+    ensure_compose_project_name
     log_info "Project identifier: $PROJECT_NAME"
 
-    # Step 10: Load existing registry
+    # Step 2: Load existing registry (read-only, no lock needed yet)
     parse_ini_file
 
-    # Step 10: Clean up stale projects (paths that no longer exist)
-    cleanup_stale_projects
-
-    # Step 11: Check if project already registered
+    # Step 3: Check if project already registered (before any other validation or user input)
     if is_project_registered "$PROJECT_NAME"; then
         exit_with_error $EXIT_ALREADY_REGISTERED \
             "Project '$PROJECT_NAME' is already registered in the port registry.
@@ -1859,6 +1829,37 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     fi
     log_success "Project not yet registered"
 
+    # Step 4: Validate Docker is installed and running
+    validate_docker
+
+    # Step 5: Check for Docker network issues
+    check_docker_networks
+
+    # Step 6: Validate docker-compose.yml exists
+    validate_docker_compose
+
+    # Step 7: Collect all user input upfront
+    collect_user_input
+
+    # Step 8: Run composer install (non-interactive)
+    run_composer_install
+
+    # Step 9: Validate/create .env file
+    validate_env_file
+
+    # Step 10: Check .env for existing port definitions
+    check_env_for_ports
+
+    # Step 11: Acquire lock on registry
+    acquire_lock
+    log_success "Acquired registry lock"
+
+    # Step 12: Reload registry and clean up stale projects (now with lock held)
+    # Note: We already loaded the registry earlier for the duplicate check,
+    # but we need to reload it here with the lock to ensure we have the latest state
+    parse_ini_file
+    cleanup_stale_projects
+
     local num_other_projects=${#REGISTRY_PROJECTS[@]}
     if [ $num_other_projects -gt 0 ]; then
         log_success "Loaded existing registry ($num_other_projects other project(s))"
@@ -1866,7 +1867,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         log_success "Registry is empty (first project)"
     fi
 
-    # Step 12: Extract port variables from docker-compose.yml
+    # Step 13: Extract port variables from docker-compose.yml
     local port_vars_output=$(extract_port_vars)
     readarray -t port_vars_array <<< "$port_vars_output"
     local num_port_vars=${#port_vars_array[@]}
@@ -1875,7 +1876,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     echo ""
     log_info "Assigning ports:"
 
-    # Step 13: Assign ports
+    # Step 14: Assign ports
     for port_var in "${port_vars_array[@]}"; do
         local var_name="${port_var%:*}"
         local default_port="${port_var#*:}"
@@ -1899,7 +1900,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
 
     echo ""
 
-    # Step 14: Domain registration (non-interactive)
+    # Step 15: Domain registration (non-interactive)
     if [ "$REGISTER_DOMAIN" = true ]; then
         prompt_domain_registration
 
@@ -1921,11 +1922,11 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         echo ""
     fi
 
-    # Step 15: Save registry
+    # Step 16: Save registry
     save_registry
     log_success "Updated registry: $REGISTRY_FILE"
 
-    # Step 16: Append to .env
+    # Step 17: Append to .env
     append_ports_to_env
 
     # Build success message with APP_URL info
@@ -1941,14 +1942,14 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     fi
     log_success "$success_msg"
 
-    # Step 17: Release lock
+    # Step 18: Release lock
     release_lock
 
     # Success message
     echo ""
     log_success "Project setup complete! Assigned $num_port_vars ports to '$PROJECT_NAME'."
 
-    # Step 18: Run post-setup commands (non-interactive)
+    # Step 19: Run post-setup commands (non-interactive)
     if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
         echo ""
         echo "=========================================="
