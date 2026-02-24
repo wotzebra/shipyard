@@ -746,6 +746,10 @@ sanitize_project_name() {
 }
 
 parse_ini_file() {
+    # Reset global arrays so repeated calls don't accumulate duplicates
+    REGISTRY_PROJECTS=()
+    REGISTRY_ALL_PORTS=()
+
     # If registry doesn't exist yet, that's OK (first run)
     if [ ! -f "$REGISTRY_FILE" ]; then
         return 0
