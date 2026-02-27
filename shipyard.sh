@@ -670,9 +670,6 @@ run_composer_install() {
     log_info "Using PHP ${php_version:0:1}.${php_version:1} composer image: $composer_image"
     echo ""
 
-    # Write auth.json to the project directory (persisted for future use)
-    write_composer_auth_json
-
     log_info "Running composer install via Docker..."
     echo ""
 
@@ -1900,9 +1897,11 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     # Step 8: Collect all user input upfront
     collect_user_input
 
-    # Step 9: Run composer install (non-interactive, only when laravel/sail is in composer.json)
+    # Step 9: Always write auth.json for private composer repositories.
+    # Then run composer install only when laravel/sail is in composer.json.
     # Without Sail, there is no laravelsail docker image to use for pre-Docker composer install.
     # Composer will instead be run inside the running container after Docker starts (post-setup step 2).
+    write_composer_auth_json
     if is_sail_installed; then
         run_composer_install
     else
