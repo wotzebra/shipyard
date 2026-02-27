@@ -585,6 +585,22 @@ detect_php_version() {
     fi
 }
 
+is_sail_installed() {
+    [ -f "composer.json" ] && grep -q '"laravel/sail"' composer.json
+}
+
+detect_php_service() {
+    # Extract the first service name listed under services: in docker-compose.yml
+    local service
+    service=$(awk '/^services:/{found=1; next} found && /^    [a-zA-Z0-9._-]+:/{print $1; exit}' "$COMPOSE_FILE" | tr -d ':')
+
+    if [ -z "$service" ]; then
+        echo "laravel.test"
+    else
+        echo "$service"
+    fi
+}
+
 run_composer_install() {
     echo ""
     log_info "=========================================="
@@ -1749,8 +1765,13 @@ collect_user_input() {
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo -e "${DIM}After port assignment, these commands can be run:${NC}"
-    echo -e "  ${DIM}1.${NC} Start Docker containers ${DIM}(vendor/bin/sail up -d)${NC}"
-    echo -e "  ${DIM}2.${NC} Run Laravel setup ${DIM}(vendor/bin/sail composer setup)${NC}"
+    if is_sail_installed; then
+        echo -e "  ${DIM}1.${NC} Start Docker containers ${DIM}(vendor/bin/sail up -d)${NC}"
+        echo -e "  ${DIM}2.${NC} Run Laravel setup ${DIM}(vendor/bin/sail composer setup)${NC}"
+    else
+        echo -e "  ${DIM}1.${NC} Start Docker containers ${DIM}(docker-compose up -d)${NC}"
+        echo -e "  ${DIM}2.${NC} Run Laravel setup ${DIM}(docker-compose exec <service> composer setup)${NC}"
+    fi
     echo ""
     echo -n "Run these commands automatically? [Y/n]: "
     read -r RUN_POST_SETUP
@@ -1862,8 +1883,14 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     # Step 8: Collect all user input upfront
     collect_user_input
 
-    # Step 9: Run composer install (non-interactive)
-    run_composer_install
+    # Step 9: Run composer install (non-interactive, only when laravel/sail is in composer.json)
+    # Without Sail, there is no laravelsail docker image to use for pre-Docker composer install.
+    # Composer will instead be run inside the running container after Docker starts (post-setup step 2).
+    if is_sail_installed; then
+        run_composer_install
+    else
+        log_info "Skipping pre-Docker composer install (laravel/sail not found in composer.json)"
+    fi
 
     # Step 10: Validate/create .env file
     validate_env_file
@@ -1978,26 +2005,46 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         echo "=========================================="
         echo ""
 
-        log_info "Step 1/2: Starting Docker containers (vendor/bin/sail up -d)..."
-        ./vendor/bin/sail up -d
+        log_info "Step 1/2: Starting Docker containers..."
+        if is_sail_installed; then
+            ./vendor/bin/sail up -d
+        else
+            docker-compose up -d
+        fi
 
         if [ $? -ne 0 ]; then
             echo ""
             log_error "Failed to start Docker containers."
             echo "You may need to run this manually:"
-            echo "  ./vendor/bin/sail up -d"
+            if is_sail_installed; then
+                echo "  ./vendor/bin/sail up -d"
+            else
+                echo "  docker-compose up -d"
+            fi
             exit 9
         fi
         log_success "Docker containers started"
 
         echo ""
-        log_info "Step 2/2: Running Laravel setup (vendor/bin/sail composer setup)..."
-        ./vendor/bin/sail composer setup
+        log_info "Step 2/2: Running Laravel setup (composer setup)..."
+        if is_sail_installed; then
+            ./vendor/bin/sail composer setup
+        else
+            local php_service
+            php_service=$(detect_php_service)
+            docker-compose exec "$php_service" composer setup
+        fi
 
         if [ $? -ne 0 ]; then
             echo ""
             log_error "Laravel setup failed. You may need to run this manually:"
-            echo "  ./vendor/bin/sail composer setup"
+            if is_sail_installed; then
+                echo "  ./vendor/bin/sail composer setup"
+            else
+                local php_service
+                php_service=$(detect_php_service)
+                echo "  docker-compose exec $php_service composer setup"
+            fi
             exit 9
         fi
         log_success "Laravel setup completed"
@@ -2030,8 +2077,15 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
         echo "To complete setup manually, run:"
-        echo -e "  ${DIM}1.${NC} ./vendor/bin/sail up -d"
-        echo -e "  ${DIM}2.${NC} ./vendor/bin/sail composer setup"
+        if is_sail_installed; then
+            echo -e "  ${DIM}1.${NC} ./vendor/bin/sail up -d"
+            echo -e "  ${DIM}2.${NC} ./vendor/bin/sail composer setup"
+        else
+            local php_service
+            php_service=$(detect_php_service)
+            echo -e "  ${DIM}1.${NC} docker-compose up -d"
+            echo -e "  ${DIM}2.${NC} docker-compose exec $php_service composer setup"
+        fi
     fi
 }
 
