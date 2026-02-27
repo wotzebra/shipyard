@@ -589,6 +589,14 @@ is_sail_installed() {
     [ -f "composer.json" ] && grep -q '"laravel/sail"' composer.json
 }
 
+is_laravel_project() {
+    [ -f "composer.json" ] && grep -q '"laravel/framework"' composer.json
+}
+
+is_vite_installed() {
+    [ -f "package.json" ] && grep -q '"vite"' package.json
+}
+
 detect_php_service() {
     # Extract the first service name listed under services: in docker-compose.yml
     local service
@@ -1281,8 +1289,8 @@ append_ports_to_env() {
         # Always add COMPOSE_PROJECT_NAME (normalized from path)
         echo "COMPOSE_PROJECT_NAME=$PROJECT_NAME"
 
-        # Add APP_URL based on domain registration or APP_PORT
-        if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
+        # Add APP_URL and ASSET_URL only for Laravel projects
+        if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ] && is_laravel_project; then
             if [ "$DOMAIN_REGISTERED" = true ]; then
                 # Use domain with protocol based on secure setting
                 if [ "$USE_SECURE_PROXY" = true ]; then
@@ -1290,13 +1298,20 @@ append_ports_to_env() {
                 else
                     echo "APP_URL=http://${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
                 fi
-                echo "VITE_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
             else
                 # Fall back to localhost
                 echo "APP_URL=http://localhost:${PORT_ASSIGNMENTS[APP_PORT]}"
-                echo "VITE_SERVER_HOST=localhost"
             fi
             echo "ASSET_URL=\"\${APP_URL}\""
+        fi
+
+        # Add VITE_SERVER_HOST only when Vite is installed
+        if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ] && is_vite_installed; then
+            if [ "$DOMAIN_REGISTERED" = true ]; then
+                echo "VITE_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+            else
+                echo "VITE_SERVER_HOST=localhost"
+            fi
         fi
 
         # Add port assignments in sorted order
