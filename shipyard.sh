@@ -1189,6 +1189,13 @@ extract_port_vars() {
 is_port_available() {
     local port=$1
 
+    # Check ports already assigned in this run
+    for assigned_port in "${PORT_ASSIGNMENTS[@]}"; do
+        if [ "$assigned_port" = "$port" ]; then
+            return 1  # Already assigned to another variable this run
+        fi
+    done
+
     # Check registry first
     if is_port_in_registry "$port"; then
         return 1  # Port taken in registry
