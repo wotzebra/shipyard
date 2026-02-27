@@ -717,17 +717,50 @@ restore_database() {
 
     log_info "Restoring database from: $(basename "$backup_file")..."
 
+    # Check for DEFINER references and strip them if present
+    local has_definer=false
+    # LC_ALL=C avoids "illegal byte sequence" on macOS sed with non-UTF8 dump files.
+    # The pattern covers: /*!50013 DEFINER=`user`@`host` SQL SECURITY DEFINER */
+    # as well as a bare: DEFINER=`user`@`host` on CREATE statements.
+    local sed_strip='s/\/\*![0-9]* DEFINER=`[^`]*`@`[^`]*`[^*]*\*\///g; s/DEFINER=`[^`]*`@`[^`]*` //g'
+
     if [[ "$backup_file" == *.gz ]]; then
-        echo -e "  ${DIM}$ gunzip -c \"$backup_file\" | docker exec -i $container_name mysql -u$db_user -p***** $db_name${NC}"
-        if ! gunzip -c "$backup_file" | docker exec -i "$container_name" mysql -u"$db_user" -p"$db_pass" "$db_name"; then
-            log_error "Database restore failed."
-            return 1
+        gunzip -c "$backup_file" | grep -qc "DEFINER" 2>/dev/null && has_definer=true
+    else
+        grep -qc "DEFINER" "$backup_file" 2>/dev/null && has_definer=true
+    fi
+
+    if [ "$has_definer" = true ]; then
+        log_info "DEFINER references detected — stripping before restore..."
+    fi
+
+    if [[ "$backup_file" == *.gz ]]; then
+        if [ "$has_definer" = true ]; then
+            echo -e "  ${DIM}$ gunzip -c \"$backup_file\" | sed '...' | docker exec -i $container_name mysql -u$db_user -p***** $db_name${NC}"
+            if ! gunzip -c "$backup_file" | LC_ALL=C sed "$sed_strip" | docker exec -i "$container_name" mysql -u"$db_user" -p"$db_pass" "$db_name"; then
+                log_error "Database restore failed."
+                return 1
+            fi
+        else
+            echo -e "  ${DIM}$ gunzip -c \"$backup_file\" | docker exec -i $container_name mysql -u$db_user -p***** $db_name${NC}"
+            if ! gunzip -c "$backup_file" | docker exec -i "$container_name" mysql -u"$db_user" -p"$db_pass" "$db_name"; then
+                log_error "Database restore failed."
+                return 1
+            fi
         fi
     else
-        echo -e "  ${DIM}$ docker exec -i $container_name mysql -u$db_user -p$db_pass $db_name < \"$backup_file\"${NC}"
-        if ! docker exec -i "$container_name" mysql -u"$db_user" -p"$db_pass" "$db_name" < "$backup_file"; then
-            log_error "Database restore failed."
-            return 1
+        if [ "$has_definer" = true ]; then
+            echo -e "  ${DIM}$ sed '...' \"$backup_file\" | docker exec -i $container_name mysql -u$db_user -p***** $db_name${NC}"
+            if ! LC_ALL=C sed "$sed_strip" "$backup_file" | docker exec -i "$container_name" mysql -u"$db_user" -p"$db_pass" "$db_name"; then
+                log_error "Database restore failed."
+                return 1
+            fi
+        else
+            echo -e "  ${DIM}$ docker exec -i $container_name mysql -u$db_user -p***** $db_name < \"$backup_file\"${NC}"
+            if ! docker exec -i "$container_name" mysql -u"$db_user" -p"$db_pass" "$db_name" < "$backup_file"; then
+                log_error "Database restore failed."
+                return 1
+            fi
         fi
     fi
 
