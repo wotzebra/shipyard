@@ -867,14 +867,14 @@ cleanup_stale_projects() {
                 fi
             fi
 
-            # Clean up Sail volumes if they exist
+            # Clean up all project volumes if they exist
             # The project name is already normalized (lowercase, valid Docker Compose format)
-            log_info "    Checking for Sail volumes to clean up..."
+            log_info "    Checking for project volumes to clean up..."
 
-            # Find all volumes matching the pattern: project_sail-*
-            local sail_volumes=$(docker volume ls --format "{{.Name}}" 2>/dev/null | grep "^${project}_sail-" || true)
+            # Find all volumes matching the pattern: project_* (includes Sail and non-Sail volumes)
+            local project_volumes=$(docker volume ls --format "{{.Name}}" 2>/dev/null | grep "^${project}_" || true)
 
-            if [ -n "$sail_volumes" ]; then
+            if [ -n "$project_volumes" ]; then
                 local volume_count=0
                 while IFS= read -r volume_name; do
                     if [ -n "$volume_name" ]; then
@@ -885,13 +885,13 @@ cleanup_stale_projects() {
                             log_info "    ! Failed to remove volume: $volume_name (may be in use)"
                         fi
                     fi
-                done <<< "$sail_volumes"
+                done <<< "$project_volumes"
 
                 if [ $volume_count -gt 0 ]; then
-                    log_info "    ✓ Removed $volume_count Sail volume(s)"
+                    log_info "    ✓ Removed $volume_count volume(s)"
                 fi
             else
-                log_info "    No Sail volumes found"
+                log_info "    No project volumes found"
             fi
 
             removed_count=$((removed_count + 1))
