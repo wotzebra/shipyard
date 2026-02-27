@@ -607,6 +607,55 @@ detect_php_service() {
     fi
 }
 
+write_composer_auth_json() {
+    local repositories=($(extract_composer_repositories))
+
+    if [ ${#repositories[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    log_info "Writing auth.json with private repository credentials..."
+
+    # Build the http-basic JSON block
+    local http_basic_entries=""
+    local repo_index=0
+
+    for repo in "${repositories[@]}"; do
+        local username="${COMPOSER_REPO_USERNAMES[$repo_index]}"
+        local password="${COMPOSER_REPO_PASSWORDS[$repo_index]}"
+
+        if [ -n "$http_basic_entries" ]; then
+            http_basic_entries="$http_basic_entries,"$'\n'
+        fi
+        http_basic_entries="${http_basic_entries}        \"$repo\": {\"username\": \"$username\", \"password\": \"$password\"}"
+
+        repo_index=$((repo_index + 1))
+    done
+
+    cat > auth.json <<EOF
+{
+    "http-basic": {
+$http_basic_entries
+    }
+}
+EOF
+
+    log_success "auth.json written"
+
+    # Ensure auth.json is in .gitignore
+    if [ -f ".gitignore" ]; then
+        if ! grep -qxF "auth.json" .gitignore; then
+            echo "auth.json" >> .gitignore
+            log_success "auth.json added to .gitignore"
+        fi
+    else
+        echo "auth.json" > .gitignore
+        log_success ".gitignore created with auth.json"
+    fi
+
+    echo ""
+}
+
 run_composer_install() {
     echo ""
     log_info "=========================================="
@@ -621,62 +670,17 @@ run_composer_install() {
     log_info "Using PHP ${php_version:0:1}.${php_version:1} composer image: $composer_image"
     echo ""
 
-    # Extract repositories from composer.json
-    local repositories=($(extract_composer_repositories))
+    # Write auth.json to the project directory (persisted for future use)
+    write_composer_auth_json
 
-    if [ ${#repositories[@]} -eq 0 ]; then
-        log_info "No private repositories found in composer.json, running composer install..."
-        echo ""
-        docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w /var/www/html "$composer_image" composer install --ignore-platform-reqs
-
-        if [ $? -ne 0 ]; then
-            echo ""
-            log_error "Composer install failed."
-            exit 9
-        fi
-
-        log_success "Composer dependencies installed"
-        echo ""
-        return 0
-    fi
-
-    log_info "Found ${#repositories[@]} private repository/repositories, configuring credentials..."
-    echo ""
-
-    # Build the composer config commands using pre-collected credentials
-    local config_commands=""
-    local repo_index=0
-
-    for repo in "${repositories[@]}"; do
-        local username="${COMPOSER_REPO_USERNAMES[$repo_index]}"
-        local password="${COMPOSER_REPO_PASSWORDS[$repo_index]}"
-
-        # Add to config commands
-        if [ -n "$config_commands" ]; then
-            config_commands="$config_commands && "
-        fi
-        config_commands="${config_commands}composer config http-basic.$repo $username $password"
-
-        echo "  ✓ Using credentials for $repo"
-
-        repo_index=$((repo_index + 1))
-    done
-
-    # Run composer install with all credentials configured
-    echo ""
     log_info "Running composer install via Docker..."
     echo ""
 
-    local full_command="$config_commands && composer install --ignore-platform-reqs"
-
-    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w /var/www/html "$composer_image" bash -c "$full_command"
+    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w /var/www/html "$composer_image" composer install --ignore-platform-reqs
 
     if [ $? -ne 0 ]; then
         echo ""
         log_error "Composer install failed. Please check your credentials and try again."
-        echo ""
-        echo "Command that failed:"
-        echo "  docker run --rm -u \"\$(id -u):\$(id -g)\" -v \$(pwd):/var/www/html -w /var/www/html $composer_image bash -c \"$config_commands && composer install --ignore-platform-reqs\""
         exit 9
     fi
 
