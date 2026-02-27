@@ -1983,10 +1983,10 @@ collect_user_input() {
     echo -e "${DIM}After port assignment, these commands can be run:${NC}"
     if is_sail_installed; then
         echo -e "  ${DIM}1.${NC} Start Docker containers ${DIM}(vendor/bin/sail up -d)${NC}"
-        echo -e "  ${DIM}2.${NC} Run Laravel setup ${DIM}(vendor/bin/sail composer setup)${NC}"
+        echo -e "  ${DIM}2.${NC} Run Composer setup ${DIM}(vendor/bin/sail composer setup)${NC}"
     else
         echo -e "  ${DIM}1.${NC} Start Docker containers ${DIM}(docker-compose up -d)${NC}"
-        echo -e "  ${DIM}2.${NC} Run Laravel setup ${DIM}(docker-compose exec <service> composer setup)${NC}"
+        echo -e "  ${DIM}2.${NC} Run Composer setup ${DIM}(docker-compose exec <service> composer setup)${NC}"
     fi
     echo ""
     echo -n "Run these commands automatically? [Y/n]: "
@@ -2037,8 +2037,8 @@ collect_user_input() {
     if [ -n "$BACKUP_FILE" ] && [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
         echo ""
         echo -e "${DIM}When should the database be restored?${NC}"
-        echo -e "  ${DIM}1.${NC} Before Laravel setup ${DIM}(containers start → restore → composer setup)${NC}"
-        echo -e "  ${DIM}2.${NC} After Laravel setup  ${DIM}(containers start → composer setup → restore)${NC}"
+        echo -e "  ${DIM}1.${NC} Before Composer setup ${DIM}(containers start → restore → composer setup)${NC}"
+        echo -e "  ${DIM}2.${NC} After Composer setup  ${DIM}(containers start → composer setup → restore)${NC}"
         echo ""
         echo -n "Select [1]: "
         read -r restore_order
@@ -2047,11 +2047,11 @@ collect_user_input() {
         case "$restore_order" in
             2)
                 RESTORE_BEFORE_SETUP=false
-                log_success "Selected: restore after Laravel setup"
+                log_success "Selected: restore after Composer setup"
                 ;;
             *)
                 RESTORE_BEFORE_SETUP=true
-                log_success "Selected: restore before Laravel setup"
+                log_success "Selected: restore before Composer setup"
                 ;;
         esac
     fi
@@ -2076,9 +2076,9 @@ collect_user_input() {
     fi
     if [ -n "$BACKUP_FILE" ]; then
         if [ "$RESTORE_BEFORE_SETUP" = true ]; then
-            echo -e "  ${DIM}•${NC} DB restore: ${CYAN}$(basename "$BACKUP_FILE")${NC} ${DIM}(before Laravel setup)${NC}"
+            echo -e "  ${DIM}•${NC} DB restore: ${CYAN}$(basename "$BACKUP_FILE")${NC} ${DIM}(before Composer setup)${NC}"
         else
-            echo -e "  ${DIM}•${NC} DB restore: ${CYAN}$(basename "$BACKUP_FILE")${NC} ${DIM}(after Laravel setup)${NC}"
+            echo -e "  ${DIM}•${NC} DB restore: ${CYAN}$(basename "$BACKUP_FILE")${NC} ${DIM}(after Composer setup)${NC}"
         fi
     else
         echo -e "  ${DIM}•${NC} DB restore: ${DIM}Not configured${NC}"
@@ -2102,9 +2102,9 @@ collect_user_input() {
     fi
     if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
         if [ -n "$BACKUP_FILE" ]; then
-            echo -e "  ${DIM}5.${NC} Start Docker containers, restore database, and run Laravel setup"
+            echo -e "  ${DIM}5.${NC} Start Docker containers, restore database, and run Composer setup"
         else
-            echo -e "  ${DIM}5.${NC} Start Docker containers and run Laravel setup"
+            echo -e "  ${DIM}5.${NC} Start Docker containers and run Composer setup"
         fi
     fi
     echo ""
@@ -2333,7 +2333,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
          echo ""
          local composer_step=2
          [ -n "$BACKUP_FILE" ] && [ "$RESTORE_BEFORE_SETUP" = true ] && composer_step=3
-         log_info "Step $composer_step/$total_steps: Running Laravel setup (composer setup)..."
+         log_info "Step $composer_step/$total_steps: Running Composer setup..."
          if is_sail_installed; then
              ./vendor/bin/sail composer setup
          else
@@ -2344,7 +2344,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
 
          if [ $? -ne 0 ]; then
              echo ""
-             log_error "Laravel setup failed. You may need to run this manually:"
+             log_error "Composer setup failed. You may need to run this manually:"
              if is_sail_installed; then
                  echo "  ./vendor/bin/sail composer setup"
              else
@@ -2354,7 +2354,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
              fi
              exit 9
          fi
-         log_success "Laravel setup completed"
+         log_success "Composer setup completed"
 
          # Restore after composer setup if requested
          if [ -n "$BACKUP_FILE" ] && [ "$RESTORE_BEFORE_SETUP" = false ]; then
