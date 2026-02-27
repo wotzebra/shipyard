@@ -592,7 +592,13 @@ is_sail_installed() {
 detect_php_service() {
     # Extract the first service name listed under services: in docker-compose.yml
     local service
-    service=$(awk '/^services:/{found=1; next} found && /^    [a-zA-Z0-9._-]+:/{print $1; exit}' "$COMPOSE_FILE" | tr -d ':')
+    service=$(awk '
+        /^services:/ { found=1; indent=""; next }
+        found && indent == "" && /^[[:space:]]+[a-zA-Z0-9._-]+:/ {
+            match($0, /^[[:space:]]+/); indent = substr($0, 1, RLENGTH)
+        }
+        found && indent != "" && $0 ~ "^" indent "[a-zA-Z0-9._-]+:" { print $1; exit }
+    ' "$COMPOSE_FILE" | tr -d ':')
 
     if [ -z "$service" ]; then
         echo "laravel.test"
