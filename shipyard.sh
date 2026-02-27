@@ -80,6 +80,8 @@ declare -a COMPOSER_REPO_PASSWORDS=()
 REGISTER_DOMAIN=false
 USER_DOMAIN_NAME=""
 RUN_POST_SETUP=""
+BACKUP_FILE=""
+RESTORE_BEFORE_SETUP=true
 
 # ==============================================================================
 # COLORS & STYLING
@@ -620,6 +622,130 @@ detect_php_service() {
         echo "laravel.test"
     else
         echo "$service"
+    fi
+}
+
+detect_db_service() {
+    # Look for a service using a mysql or mariadb image in docker-compose.yml
+    local service
+    service=$(awk '
+        /^services:/ { in_services=1; next }
+        in_services && /^[[:space:]]{2,4}[a-zA-Z0-9._-]+:[[:space:]]*$/ {
+            gsub(/[[:space:]]|:/, "", $0); current_service=$0
+        }
+        in_services && current_service && /image:[[:space:]]*(mysql|mariadb)/ {
+            print current_service; exit
+        }
+    ' "$COMPOSE_FILE")
+
+    if [ -z "$service" ]; then
+        echo "mysql"
+    else
+        echo "$service"
+    fi
+}
+
+wait_for_db() {
+    local db_service="$1"
+    local db_user="$2"
+    local db_pass="$3"
+    local db_name="$4"
+    local max_attempts=30
+    local attempt=0
+    local container_name
+
+    # Resolve the actual container name from the compose service
+    container_name=$(docker compose ps -q "$db_service" 2>/dev/null || docker-compose ps -q "$db_service" 2>/dev/null)
+
+    if [ -z "$container_name" ]; then
+        # Fall back to guessing the container name from the project + service
+        container_name="${PROJECT_NAME}-${db_service}-1"
+    fi
+
+    log_info "Waiting for database to be ready..."
+
+    while [ $attempt -lt $max_attempts ]; do
+        # Connect as the app user to the target database — this only succeeds once
+        # MySQL has finished initializing and the user grants have been applied.
+        if docker exec "$container_name" mysql -u"$db_user" -p"$db_pass" "$db_name" \
+            -e "SELECT 1;" >/dev/null 2>&1; then
+            log_success "Database is ready"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        echo -ne "  ${DIM}Attempt $attempt/$max_attempts...${NC}\r"
+        sleep 2
+    done
+
+    echo ""
+    log_error "Database did not become ready within $((max_attempts * 2)) seconds."
+    return 1
+}
+
+restore_database() {
+    local backup_file="$1"
+    local db_service
+    local db_name db_user db_pass
+    local container_name
+
+    db_service=$(detect_db_service)
+
+    # Read credentials from .env
+    db_name=$(grep -E '^DB_DATABASE=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
+    db_user=$(grep -E '^DB_USERNAME=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
+    db_pass=$(grep -E '^DB_PASSWORD=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
+
+    if [ -z "$db_name" ] || [ -z "$db_user" ]; then
+        log_error "Could not read DB_DATABASE or DB_USERNAME from .env — skipping restore."
+        echo -e "${DIM}Run the restore manually once the containers are up.${NC}"
+        return 1
+    fi
+
+    # Wait until MySQL is accepting connections as the app user
+    if ! wait_for_db "$db_service" "$db_user" "$db_pass" "$db_name"; then
+        echo ""
+        echo -e "${YELLOW}You can restore the database manually once MySQL is ready:${NC}"
+        _print_manual_restore_cmd "$backup_file" "$db_service" "$db_user" "$db_pass" "$db_name"
+        return 1
+    fi
+
+    # Resolve container name
+    container_name=$(docker compose ps -q "$db_service" 2>/dev/null || docker-compose ps -q "$db_service" 2>/dev/null)
+    if [ -z "$container_name" ]; then
+        container_name="${PROJECT_NAME}-${db_service}-1"
+    fi
+
+    log_info "Restoring database from: $(basename "$backup_file")..."
+
+    if [[ "$backup_file" == *.gz ]]; then
+        echo -e "  ${DIM}$ gunzip -c \"$backup_file\" | docker exec -i $container_name mysql -u$db_user -p***** $db_name${NC}"
+        if ! gunzip -c "$backup_file" | docker exec -i "$container_name" mysql -u"$db_user" -p"$db_pass" "$db_name"; then
+            log_error "Database restore failed."
+            return 1
+        fi
+    else
+        echo -e "  ${DIM}$ docker exec -i $container_name mysql -u$db_user -p$db_pass $db_name < \"$backup_file\"${NC}"
+        if ! docker exec -i "$container_name" mysql -u"$db_user" -p"$db_pass" "$db_name" < "$backup_file"; then
+            log_error "Database restore failed."
+            return 1
+        fi
+    fi
+
+    log_success "Database restored successfully"
+}
+
+_print_manual_restore_cmd() {
+    local backup_file="$1"
+    local db_service="$2"
+    local db_user="$3"
+    local db_pass="$4"
+    local db_name="$5"
+    local container="${PROJECT_NAME}-${db_service}-1"
+
+    if [[ "$backup_file" == *.gz ]]; then
+        echo -e "  gunzip -c \"$backup_file\" | docker exec -i $container mysql -u$db_user -p$db_pass $db_name"
+    else
+        echo -e "  docker exec -i $container mysql -u$db_user -p$db_pass $db_name < \"$backup_file\""
     fi
 }
 
@@ -1834,6 +1960,69 @@ collect_user_input() {
     read -r RUN_POST_SETUP
     RUN_POST_SETUP=${RUN_POST_SETUP:-Y}
 
+    # 5. Ask about SQL backup restore
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🗄  Database Restore (optional)${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${DIM}Provide a path to a SQL backup file to restore into the database${NC}"
+    echo -e "${DIM}after the containers start. Supports plain .sql and gzipped .sql.gz files.${NC}"
+    echo ""
+
+    while true; do
+        echo -n "Path to SQL backup file [leave blank to skip]: "
+        read -r BACKUP_FILE
+
+        if [ -z "$BACKUP_FILE" ]; then
+            break
+        fi
+
+        # Strip surrounding single quotes and expand ~
+        BACKUP_FILE="${BACKUP_FILE#\'}"
+        BACKUP_FILE="${BACKUP_FILE%\'}"
+        BACKUP_FILE="${BACKUP_FILE/#\~/$HOME}"
+
+        if [ ! -f "$BACKUP_FILE" ]; then
+            echo -e "${YELLOW}File not found: $BACKUP_FILE${NC}"
+            echo -e "${DIM}Please enter a valid path or leave blank to skip.${NC}"
+            BACKUP_FILE=""
+            continue
+        fi
+
+        if [[ "$BACKUP_FILE" != *.sql && "$BACKUP_FILE" != *.sql.gz ]]; then
+            echo -e "${YELLOW}File must end in .sql or .sql.gz${NC}"
+            echo -e "${DIM}Please enter a valid backup file or leave blank to skip.${NC}"
+            BACKUP_FILE=""
+            continue
+        fi
+
+        log_success "Backup file: $BACKUP_FILE"
+        break
+    done
+
+    if [ -n "$BACKUP_FILE" ] && [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
+        echo ""
+        echo -e "${DIM}When should the database be restored?${NC}"
+        echo -e "  ${DIM}1.${NC} Before Laravel setup ${DIM}(containers start → restore → composer setup)${NC}"
+        echo -e "  ${DIM}2.${NC} After Laravel setup  ${DIM}(containers start → composer setup → restore)${NC}"
+        echo ""
+        echo -n "Select [1]: "
+        read -r restore_order
+        restore_order=${restore_order:-1}
+
+        case "$restore_order" in
+            2)
+                RESTORE_BEFORE_SETUP=false
+                log_success "Selected: restore after Laravel setup"
+                ;;
+            *)
+                RESTORE_BEFORE_SETUP=true
+                log_success "Selected: restore before Laravel setup"
+                ;;
+        esac
+    fi
+
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}${BOLD}✓ All user input collected!${NC}"
@@ -1851,6 +2040,15 @@ collect_user_input() {
         fi
     else
         echo -e "  ${DIM}•${NC} Domain: ${DIM}Not configured${NC}"
+    fi
+    if [ -n "$BACKUP_FILE" ]; then
+        if [ "$RESTORE_BEFORE_SETUP" = true ]; then
+            echo -e "  ${DIM}•${NC} DB restore: ${CYAN}$(basename "$BACKUP_FILE")${NC} ${DIM}(before Laravel setup)${NC}"
+        else
+            echo -e "  ${DIM}•${NC} DB restore: ${CYAN}$(basename "$BACKUP_FILE")${NC} ${DIM}(after Laravel setup)${NC}"
+        fi
+    else
+        echo -e "  ${DIM}•${NC} DB restore: ${DIM}Not configured${NC}"
     fi
     if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
         echo -e "  ${DIM}•${NC} Post-setup: ${GREEN}Auto-run enabled${NC}"
@@ -1870,7 +2068,11 @@ collect_user_input() {
         fi
     fi
     if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
-        echo -e "  ${DIM}5.${NC} Start Docker containers and run Laravel setup"
+        if [ -n "$BACKUP_FILE" ]; then
+            echo -e "  ${DIM}5.${NC} Start Docker containers, restore database, and run Laravel setup"
+        else
+            echo -e "  ${DIM}5.${NC} Start Docker containers and run Laravel setup"
+        fi
     fi
     echo ""
     read -r -p "Continue with setup? [Y/n] " confirm
@@ -2056,97 +2258,126 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     echo ""
     log_success "Project setup complete! Assigned $num_port_vars ports to '$PROJECT_NAME'."
 
-    # Step 20: Run post-setup commands (non-interactive)
-    if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
-        echo ""
-        echo "=========================================="
-        echo "Running post-setup commands..."
-        echo "=========================================="
-        echo ""
+     # Step 20: Run post-setup commands (non-interactive)
+     if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
+         echo ""
+         echo "=========================================="
+         echo "Running post-setup commands..."
+         echo "=========================================="
+         echo ""
 
-        log_info "Step 1/2: Starting Docker containers..."
-        if is_sail_installed; then
-            ./vendor/bin/sail up -d
-        else
-            docker-compose up -d
-        fi
+         # Determine total step count for progress display
+         local total_steps=2
+         [ -n "$BACKUP_FILE" ] && total_steps=3
 
-        if [ $? -ne 0 ]; then
-            echo ""
-            log_error "Failed to start Docker containers."
-            echo "You may need to run this manually:"
-            if is_sail_installed; then
-                echo "  ./vendor/bin/sail up -d"
-            else
-                echo "  docker-compose up -d"
-            fi
-            exit 9
-        fi
-        log_success "Docker containers started"
+         log_info "Step 1/$total_steps: Starting Docker containers..."
+         if is_sail_installed; then
+             ./vendor/bin/sail up -d
+         else
+             docker-compose up -d
+         fi
 
-        echo ""
-        log_info "Step 2/2: Running Laravel setup (composer setup)..."
-        if is_sail_installed; then
-            ./vendor/bin/sail composer setup
-        else
-            local php_service
-            php_service=$(detect_php_service)
-            docker-compose exec "$php_service" composer setup
-        fi
+         if [ $? -ne 0 ]; then
+             echo ""
+             log_error "Failed to start Docker containers."
+             echo "You may need to run this manually:"
+             if is_sail_installed; then
+                 echo "  ./vendor/bin/sail up -d"
+             else
+                 echo "  docker-compose up -d"
+             fi
+             exit 9
+         fi
+         log_success "Docker containers started"
 
-        if [ $? -ne 0 ]; then
-            echo ""
-            log_error "Laravel setup failed. You may need to run this manually:"
-            if is_sail_installed; then
-                echo "  ./vendor/bin/sail composer setup"
-            else
-                local php_service
-                php_service=$(detect_php_service)
-                echo "  docker-compose exec $php_service composer setup"
-            fi
-            exit 9
-        fi
-        log_success "Laravel setup completed"
+         # Restore before composer setup if requested
+         if [ -n "$BACKUP_FILE" ] && [ "$RESTORE_BEFORE_SETUP" = true ]; then
+             echo ""
+             log_info "Step 2/$total_steps: Restoring database..."
+             restore_database "$BACKUP_FILE"
+         fi
 
-        echo ""
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${GREEN}${BOLD}✓ All setup complete! 🎉${NC}"
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+         echo ""
+         local composer_step=2
+         [ -n "$BACKUP_FILE" ] && [ "$RESTORE_BEFORE_SETUP" = true ] && composer_step=3
+         log_info "Step $composer_step/$total_steps: Running Laravel setup (composer setup)..."
+         if is_sail_installed; then
+             ./vendor/bin/sail composer setup
+         else
+             local php_service
+             php_service=$(detect_php_service)
+             docker-compose exec "$php_service" composer setup
+         fi
 
-        if [ "$DOMAIN_REGISTERED" = true ]; then
-            echo ""
-            echo -e "${BOLD}Your application is accessible at:${NC}"
-            echo -e "  ${CYAN}https://${REGISTERED_DOMAIN}.${DOMAIN_TLD}${NC}"
-            echo ""
-            echo -e "${DIM}SSL certificates are symlinked in ./${PROJECT_CERT_DIR}/${NC}"
-            echo -e "${DIM}  • cert.crt${NC}"
-            echo -e "${DIM}  • cert.key${NC}"
-            echo ""
-            echo -e "${DIM}Docker is listening on localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
-            echo -e "${DIM}Valet/Herd proxy: ${REGISTERED_DOMAIN}.${DOMAIN_TLD} → localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
-        elif [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
-            echo ""
-            echo -e "${BOLD}Your application should be accessible at:${NC}"
-            echo -e "  ${CYAN}http://localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
-        fi
-    else
-        echo ""
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${YELLOW}Next steps: Start containers and run setup${NC}"
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo ""
-        echo "To complete setup manually, run:"
-        if is_sail_installed; then
-            echo -e "  ${DIM}1.${NC} ./vendor/bin/sail up -d"
-            echo -e "  ${DIM}2.${NC} ./vendor/bin/sail composer setup"
-        else
-            local php_service
-            php_service=$(detect_php_service)
-            echo -e "  ${DIM}1.${NC} docker-compose up -d"
-            echo -e "  ${DIM}2.${NC} docker-compose exec $php_service composer setup"
-        fi
-    fi
-}
+         if [ $? -ne 0 ]; then
+             echo ""
+             log_error "Laravel setup failed. You may need to run this manually:"
+             if is_sail_installed; then
+                 echo "  ./vendor/bin/sail composer setup"
+             else
+                 local php_service
+                 php_service=$(detect_php_service)
+                 echo "  docker-compose exec $php_service composer setup"
+             fi
+             exit 9
+         fi
+         log_success "Laravel setup completed"
+
+         # Restore after composer setup if requested
+         if [ -n "$BACKUP_FILE" ] && [ "$RESTORE_BEFORE_SETUP" = false ]; then
+             echo ""
+             log_info "Step 3/$total_steps: Restoring database..."
+             restore_database "$BACKUP_FILE"
+         fi
+
+         echo ""
+         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+         echo -e "${GREEN}${BOLD}✓ All setup complete! 🎉${NC}"
+         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+         if [ "$DOMAIN_REGISTERED" = true ]; then
+             echo ""
+             echo -e "${BOLD}Your application is accessible at:${NC}"
+             echo -e "  ${CYAN}https://${REGISTERED_DOMAIN}.${DOMAIN_TLD}${NC}"
+             echo ""
+             echo -e "${DIM}SSL certificates are symlinked in ./${PROJECT_CERT_DIR}/${NC}"
+             echo -e "${DIM}  • cert.crt${NC}"
+             echo -e "${DIM}  • cert.key${NC}"
+             echo ""
+             echo -e "${DIM}Docker is listening on localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
+             echo -e "${DIM}Valet/Herd proxy: ${REGISTERED_DOMAIN}.${DOMAIN_TLD} → localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
+         elif [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
+             echo ""
+             echo -e "${BOLD}Your application should be accessible at:${NC}"
+             echo -e "  ${CYAN}http://localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
+         fi
+     else
+         echo ""
+         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+         echo -e "${YELLOW}Next steps: Start containers and run setup${NC}"
+         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+         echo ""
+         echo "To complete setup manually, run:"
+         if is_sail_installed; then
+             echo -e "  ${DIM}1.${NC} ./vendor/bin/sail up -d"
+             echo -e "  ${DIM}2.${NC} ./vendor/bin/sail composer setup"
+         else
+             local php_service
+             php_service=$(detect_php_service)
+             echo -e "  ${DIM}1.${NC} docker-compose up -d"
+             echo -e "  ${DIM}2.${NC} docker-compose exec $php_service composer setup"
+         fi
+         if [ -n "$BACKUP_FILE" ]; then
+             local db_service db_name db_user db_pass
+             db_service=$(detect_db_service)
+             db_name=$(grep -E '^DB_DATABASE=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
+             db_user=$(grep -E '^DB_USERNAME=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
+             db_pass=$(grep -E '^DB_PASSWORD=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
+             echo -e "  ${DIM}3.${NC} Restore the database backup:"
+             _print_manual_restore_cmd "$BACKUP_FILE" "$db_service" "$db_user" "$db_pass" "$db_name"
+         fi
+     fi
+ }
 
 # ==============================================================================
 # ENTRY POINT
