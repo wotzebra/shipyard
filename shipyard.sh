@@ -601,6 +601,10 @@ is_webpack_installed() {
     [ -f "package.json" ] && grep -q '"webpack"' package.json
 }
 
+is_laravel_mix_installed() {
+    [ -f "package.json" ] && grep -q '"laravel-mix"' package.json
+}
+
 detect_php_service() {
     # Extract the first service name listed under services: in docker-compose.yml
     local service
@@ -1327,6 +1331,15 @@ append_ports_to_env() {
             fi
         fi
 
+        # Add MIX_SERVER_HOST only when Laravel Mix is installed
+        if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ] && is_laravel_mix_installed; then
+            if [ "$DOMAIN_REGISTERED" = true ]; then
+                echo "MIX_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+            else
+                echo "MIX_SERVER_HOST=localhost"
+            fi
+        fi
+
         # Add port assignments in sorted order
         for var_name in $(echo "${!PORT_ASSIGNMENTS[@]}" | tr ' ' '\n' | sort); do
             echo "$var_name=${PORT_ASSIGNMENTS[$var_name]}"
@@ -1342,7 +1355,8 @@ append_ports_to_env() {
                [[ ! "$line" =~ ^APP_URL= ]] && \
                [[ ! "$line" =~ ^ASSET_URL= ]] && \
                [[ ! "$line" =~ ^VITE_SERVER_HOST= ]] && \
-               [[ ! "$line" =~ ^WEBPACK_SERVER_HOST= ]]; then
+               [[ ! "$line" =~ ^WEBPACK_SERVER_HOST= ]] && \
+               [[ ! "$line" =~ ^MIX_SERVER_HOST= ]]; then
                 echo "$line"
             fi
         done < "$ENV_FILE"
