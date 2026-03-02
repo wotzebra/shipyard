@@ -142,8 +142,8 @@ port_set() {
     local value="$2"
     local i=0
 
-    # Check if key already exists
-    for existing_key in "${PORT_ASSIGNMENT_KEYS[@]}"; do
+    # Check if key already exists (handle empty array with ${arr[@]+"${arr[@]}"})
+    for existing_key in ${PORT_ASSIGNMENT_KEYS[@]+"${PORT_ASSIGNMENT_KEYS[@]}"}; do
         if [ "$existing_key" = "$key" ]; then
             PORT_ASSIGNMENT_VALUES[$i]="$value"
             return 0
@@ -162,7 +162,7 @@ port_get() {
     local key="$1"
     local i=0
 
-    for existing_key in "${PORT_ASSIGNMENT_KEYS[@]}"; do
+    for existing_key in ${PORT_ASSIGNMENT_KEYS[@]+"${PORT_ASSIGNMENT_KEYS[@]}"}; do
         if [ "$existing_key" = "$key" ]; then
             echo "${PORT_ASSIGNMENT_VALUES[$i]}"
             return 0
@@ -178,7 +178,7 @@ port_get() {
 port_has() {
     local key="$1"
 
-    for existing_key in "${PORT_ASSIGNMENT_KEYS[@]}"; do
+    for existing_key in ${PORT_ASSIGNMENT_KEYS[@]+"${PORT_ASSIGNMENT_KEYS[@]}"}; do
         if [ "$existing_key" = "$key" ]; then
             return 0
         fi
@@ -189,7 +189,7 @@ port_has() {
 
 # Get all port assignment keys (sorted)
 port_keys_sorted() {
-    printf '%s\n' "${PORT_ASSIGNMENT_KEYS[@]}" | sort
+    printf '%s\n' ${PORT_ASSIGNMENT_KEYS[@]+"${PORT_ASSIGNMENT_KEYS[@]}"} | sort
 }
 
 # ==============================================================================
@@ -876,7 +876,7 @@ cleanup_stale_projects() {
     local removed_count=0
 
     # Check each project's path
-    for project in "${REGISTRY_PROJECTS[@]}"; do
+    for project in ${REGISTRY_PROJECTS[@]+"${REGISTRY_PROJECTS[@]}"}; do
         local project_sanitized=$(sanitize_project_name "$project")
         local path_var="registry_${project_sanitized}_path"
         local project_path="${!path_var}"
@@ -947,7 +947,7 @@ cleanup_stale_projects() {
 
     # Remove stale projects from REGISTRY_PROJECTS array
     local updated_projects=()
-    for project in "${REGISTRY_PROJECTS[@]}"; do
+    for project in ${REGISTRY_PROJECTS[@]+"${REGISTRY_PROJECTS[@]}"}; do
         local should_keep=true
         for remove_project in "${projects_to_remove[@]}"; do
             if [ "$project" = "$remove_project" ]; then
@@ -965,7 +965,7 @@ cleanup_stale_projects() {
 
     # Rebuild REGISTRY_ALL_PORTS array (exclude removed projects)
     REGISTRY_ALL_PORTS=()
-    for project in "${REGISTRY_PROJECTS[@]}"; do
+    for project in ${REGISTRY_PROJECTS[@]+"${REGISTRY_PROJECTS[@]}"}; do
         local project_sanitized=$(sanitize_project_name "$project")
         local vars=$(compgen -v | grep "^registry_${project_sanitized}_" || true)
         for var in $vars; do
@@ -989,7 +989,7 @@ cleanup_stale_projects() {
         echo ""
 
         # Write only existing projects
-        for project in "${REGISTRY_PROJECTS[@]}"; do
+        for project in ${REGISTRY_PROJECTS[@]+"${REGISTRY_PROJECTS[@]}"}; do
             echo "[$project]"
 
             # Get all variables for this project (use sanitized name)
@@ -1065,7 +1065,7 @@ run_list_command() {
     echo ""
 
     # Display each project with its details
-    for project in "${REGISTRY_PROJECTS[@]}"; do
+    for project in ${REGISTRY_PROJECTS[@]+"${REGISTRY_PROJECTS[@]}"}; do
         local project_sanitized=$(sanitize_project_name "$project")
         local path_var="registry_${project_sanitized}_path"
         local domain_var="registry_${project_sanitized}_domain"
@@ -1129,7 +1129,7 @@ run_list_command() {
 is_port_in_registry() {
     local port=$1
 
-    for registered_port in "${REGISTRY_ALL_PORTS[@]}"; do
+    for registered_port in ${REGISTRY_ALL_PORTS[@]+"${REGISTRY_ALL_PORTS[@]}"}; do
         if [ "$registered_port" = "$port" ]; then
             return 0  # Port is taken
         fi
@@ -1141,7 +1141,7 @@ is_port_in_registry() {
 is_project_registered() {
     local project_name=$1
 
-    for registered_project in "${REGISTRY_PROJECTS[@]}"; do
+    for registered_project in ${REGISTRY_PROJECTS[@]+"${REGISTRY_PROJECTS[@]}"}; do
         if [ "$registered_project" = "$project_name" ]; then
             return 0  # Project exists
         fi
@@ -1160,7 +1160,7 @@ save_registry() {
         echo ""
 
         # Write existing projects first
-        for project in "${REGISTRY_PROJECTS[@]}"; do
+        for project in ${REGISTRY_PROJECTS[@]+"${REGISTRY_PROJECTS[@]}"}; do
             echo "[$project]"
 
             # Get all variables for this project (use sanitized name)
