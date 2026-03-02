@@ -60,8 +60,9 @@ LOCK_ACQUIRED=false
 declare -a REGISTRY_PROJECTS=()
 declare -a REGISTRY_ALL_PORTS=()
 
-# Port assignments for current project
-declare -A PORT_ASSIGNMENTS=()
+# Port assignments for current project (parallel arrays for bash 3.2 compatibility)
+PORT_ASSIGNMENT_KEYS=()
+PORT_ASSIGNMENT_VALUES=()
 
 # Project state
 PROJECT_NAME=""
@@ -129,6 +130,66 @@ exit_with_error() {
     shift
     log_error "$*"
     exit "$exit_code"
+}
+
+# ==============================================================================
+# PORT ASSIGNMENT HELPERS (bash 3.2 compatible - no associative arrays)
+# ==============================================================================
+
+# Set a port assignment: port_set VAR_NAME PORT_VALUE
+port_set() {
+    local key="$1"
+    local value="$2"
+    local i=0
+
+    # Check if key already exists
+    for existing_key in "${PORT_ASSIGNMENT_KEYS[@]}"; do
+        if [ "$existing_key" = "$key" ]; then
+            PORT_ASSIGNMENT_VALUES[$i]="$value"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+
+    # Key doesn't exist, add new entry
+    PORT_ASSIGNMENT_KEYS+=("$key")
+    PORT_ASSIGNMENT_VALUES+=("$value")
+}
+
+# Get a port assignment value: port_get VAR_NAME
+# Echoes the value (empty string if not found)
+port_get() {
+    local key="$1"
+    local i=0
+
+    for existing_key in "${PORT_ASSIGNMENT_KEYS[@]}"; do
+        if [ "$existing_key" = "$key" ]; then
+            echo "${PORT_ASSIGNMENT_VALUES[$i]}"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+
+    echo ""
+}
+
+# Check if a port assignment exists: port_has VAR_NAME
+# Returns 0 if exists, 1 if not
+port_has() {
+    local key="$1"
+
+    for existing_key in "${PORT_ASSIGNMENT_KEYS[@]}"; do
+        if [ "$existing_key" = "$key" ]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Get all port assignment keys (sorted)
+port_keys_sorted() {
+    printf '%s\n' "${PORT_ASSIGNMENT_KEYS[@]}" | sort
 }
 
 # ==============================================================================
@@ -1126,8 +1187,8 @@ save_registry() {
         fi
 
         # Write port assignments in sorted order
-        for var_name in $(echo "${!PORT_ASSIGNMENTS[@]}" | tr ' ' '\n' | sort); do
-            echo "$var_name=${PORT_ASSIGNMENTS[$var_name]}"
+        for var_name in $(port_keys_sorted); do
+            echo "$var_name=$(port_get "$var_name")"
         done
 
     } > "$temp_file"
@@ -1252,7 +1313,8 @@ append_ports_to_env() {
         echo "COMPOSE_PROJECT_NAME=$PROJECT_NAME"
 
         # Add APP_URL based on domain registration or APP_PORT
-        if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
+        local app_port=$(port_get "APP_PORT")
+        if [ -n "$app_port" ]; then
             if [ "$DOMAIN_REGISTERED" = true ]; then
                 # Use domain with protocol based on secure setting
                 if [ "$USE_SECURE_PROXY" = true ]; then
@@ -1263,15 +1325,15 @@ append_ports_to_env() {
                 echo "VITE_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
             else
                 # Fall back to localhost
-                echo "APP_URL=http://localhost:${PORT_ASSIGNMENTS[APP_PORT]}"
+                echo "APP_URL=http://localhost:${app_port}"
                 echo "VITE_SERVER_HOST=localhost"
             fi
             echo "ASSET_URL=\"\${APP_URL}\""
         fi
 
         # Add port assignments in sorted order
-        for var_name in $(echo "${!PORT_ASSIGNMENTS[@]}" | tr ' ' '\n' | sort); do
-            echo "$var_name=${PORT_ASSIGNMENTS[$var_name]}"
+        for var_name in $(port_keys_sorted); do
+            echo "$var_name=$(port_get "$var_name")"
         done
 
         # Add blank line separator
@@ -1353,7 +1415,7 @@ check_existing_proxy() {
 
 register_domain_with_tool() {
     local domain=$1
-    local port="${PORT_ASSIGNMENTS[APP_PORT]}"
+    local port=$(port_get "APP_PORT")
 
     if [ -z "$port" ]; then
         log_error "APP_PORT not assigned. Cannot register proxy."
@@ -1393,7 +1455,7 @@ prompt_domain_registration() {
 
     # Domain name and tool already validated during input collection
     local domain="$USER_DOMAIN_NAME"
-    local port="${PORT_ASSIGNMENTS[APP_PORT]}"
+    local port=$(port_get "APP_PORT")
 
     if [ -z "$port" ]; then
         log_error "APP_PORT not assigned. Cannot register proxy."
@@ -1909,7 +1971,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         local assigned_port=$(find_next_available_port "$start_port" "$var_name")
 
         # Store assignment
-        PORT_ASSIGNMENTS["$var_name"]="$assigned_port"
+        port_set "$var_name" "$assigned_port"
 
         # Log assignment
         if [ "$assigned_port" = "$start_port" ]; then
@@ -1952,14 +2014,15 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
 
     # Build success message with APP_URL info
     local success_msg="Added $num_port_vars port assignment(s) to top of .env file"
+    local app_port=$(port_get "APP_PORT")
     if [ "$DOMAIN_REGISTERED" = true ]; then
         if [ "$USE_SECURE_PROXY" = true ]; then
             success_msg="$success_msg (APP_URL=https://${REGISTERED_DOMAIN}.${DOMAIN_TLD})"
         else
             success_msg="$success_msg (APP_URL=http://${REGISTERED_DOMAIN}.${DOMAIN_TLD})"
         fi
-    elif [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
-        success_msg="$success_msg (APP_URL=http://localhost:${PORT_ASSIGNMENTS[APP_PORT]})"
+    elif [ -n "$app_port" ]; then
+        success_msg="$success_msg (APP_URL=http://localhost:${app_port})"
     fi
     log_success "$success_msg"
 
@@ -2007,6 +2070,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         echo -e "${GREEN}${BOLD}✓ All setup complete! 🎉${NC}"
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
+        local final_app_port=$(port_get "APP_PORT")
         if [ "$DOMAIN_REGISTERED" = true ]; then
             echo ""
             echo -e "${BOLD}Your application is accessible at:${NC}"
@@ -2016,12 +2080,12 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
             echo -e "${DIM}  • cert.crt${NC}"
             echo -e "${DIM}  • cert.key${NC}"
             echo ""
-            echo -e "${DIM}Docker is listening on localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
-            echo -e "${DIM}Valet/Herd proxy: ${REGISTERED_DOMAIN}.${DOMAIN_TLD} → localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
-        elif [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
+            echo -e "${DIM}Docker is listening on localhost:${final_app_port}${NC}"
+            echo -e "${DIM}Valet/Herd proxy: ${REGISTERED_DOMAIN}.${DOMAIN_TLD} → localhost:${final_app_port}${NC}"
+        elif [ -n "$final_app_port" ]; then
             echo ""
             echo -e "${BOLD}Your application should be accessible at:${NC}"
-            echo -e "  ${CYAN}http://localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
+            echo -e "  ${CYAN}http://localhost:${final_app_port}${NC}"
         fi
     else
         echo ""
