@@ -1952,7 +1952,10 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
 
     # Step 14: Extract port variables from docker-compose.yml
     local port_vars_output=$(extract_port_vars)
-    readarray -t port_vars_array <<< "$port_vars_output"
+    port_vars_array=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && port_vars_array+=("$line")
+    done <<< "$port_vars_output"
     local num_port_vars=${#port_vars_array[@]}
     log_success "Extracted $num_port_vars port variable(s) from docker-compose.yml"
 
@@ -1960,7 +1963,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     log_info "Assigning ports:"
 
     # Step 15: Assign ports
-    for port_var in "${port_vars_array[@]}"; do
+    for port_var in ${port_vars_array[@]+"${port_vars_array[@]}"}; do
         local var_name="${port_var%:*}"
         local default_port="${port_var#*:}"
 
