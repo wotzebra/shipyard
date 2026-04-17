@@ -12,6 +12,12 @@
 
 set -euo pipefail
 
+# Require Bash 3.2+
+if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 3 ] || { [ "${BASH_VERSINFO[0]}" -eq 3 ] && [ "${BASH_VERSINFO[1]}" -lt 2 ]; }; then
+    echo "Error: Shipyard requires Bash 3.2 or newer. Detected: ${BASH_VERSION:-unknown}" >&2
+    exit 1
+fi
+
 # ==============================================================================
 # VERSION
 # ==============================================================================
@@ -60,8 +66,9 @@ LOCK_ACQUIRED=false
 declare -a REGISTRY_PROJECTS=()
 declare -a REGISTRY_ALL_PORTS=()
 
-# Port assignments for current project
-declare -A PORT_ASSIGNMENTS=()
+# Port assignments for current project (Bash 3.2 compatible key/value storage)
+declare -a PORT_ASSIGNMENT_KEYS=()
+declare -a PORT_ASSIGNMENT_VALUES=()
 
 # Project state
 PROJECT_NAME=""
@@ -1109,6 +1116,47 @@ is_project_registered() {
     return 1  # Project doesn't exist
 }
 
+set_port_assignment() {
+    local key=$1
+    local value=$2
+    local i=0
+
+    while [ $i -lt ${#PORT_ASSIGNMENT_KEYS[@]} ]; do
+        if [ "${PORT_ASSIGNMENT_KEYS[$i]}" = "$key" ]; then
+            PORT_ASSIGNMENT_VALUES[$i]="$value"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+
+    PORT_ASSIGNMENT_KEYS+=("$key")
+    PORT_ASSIGNMENT_VALUES+=("$value")
+}
+
+get_port_assignment() {
+    local key=$1
+    local i=0
+
+    while [ $i -lt ${#PORT_ASSIGNMENT_KEYS[@]} ]; do
+        if [ "${PORT_ASSIGNMENT_KEYS[$i]}" = "$key" ]; then
+            echo "${PORT_ASSIGNMENT_VALUES[$i]}"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+
+    echo ""
+    return 1
+}
+
+get_port_assignment_keys_sorted() {
+    if [ ${#PORT_ASSIGNMENT_KEYS[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    printf '%s\n' "${PORT_ASSIGNMENT_KEYS[@]}" | sort
+}
+
 save_registry() {
     local temp_file="$REGISTRY_FILE.tmp"
 
@@ -1146,8 +1194,8 @@ save_registry() {
         fi
 
         # Write port assignments in sorted order
-        for var_name in $(echo "${!PORT_ASSIGNMENTS[@]}" | tr ' ' '\n' | sort); do
-            echo "$var_name=${PORT_ASSIGNMENTS[$var_name]}"
+        for var_name in $(get_port_assignment_keys_sorted); do
+            echo "$var_name=$(get_port_assignment "$var_name")"
         done
 
     } > "$temp_file"
@@ -1194,7 +1242,7 @@ is_port_available() {
     local port=$1
 
     # Check ports already assigned in this run
-    for assigned_port in "${PORT_ASSIGNMENTS[@]}"; do
+    for assigned_port in "${PORT_ASSIGNMENT_VALUES[@]}"; do
         if [ "$assigned_port" = "$port" ]; then
             return 1  # Already assigned to another variable this run
         fi
@@ -1270,6 +1318,8 @@ ensure_compose_project_name() {
 
 append_ports_to_env() {
     local temp_file="${ENV_FILE}.tmp"
+    local app_port
+    app_port=$(get_port_assignment "APP_PORT")
 
     {
         # Add header comment at the top
@@ -1279,7 +1329,7 @@ append_ports_to_env() {
         echo "COMPOSE_PROJECT_NAME=$PROJECT_NAME"
 
         # Add APP_URL and ASSET_URL only for Laravel projects
-        if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
+        if [ -n "$app_port" ]; then
             if [ "$DOMAIN_REGISTERED" = true ]; then
                 # Use domain with protocol based on secure setting
                 if [ "$USE_SECURE_PROXY" = true ]; then
@@ -1289,13 +1339,13 @@ append_ports_to_env() {
                 fi
             else
                 # Fall back to localhost
-                echo "APP_URL=http://localhost:${PORT_ASSIGNMENTS[APP_PORT]}"
+                echo "APP_URL=http://localhost:${app_port}"
             fi
             echo "ASSET_URL=\"\${APP_URL}\""
         fi
 
         # Add VITE_SERVER_HOST only when Vite is installed
-        if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ] && is_vite_installed; then
+        if [ -n "$app_port" ] && is_vite_installed; then
             if [ "$DOMAIN_REGISTERED" = true ]; then
                 echo "VITE_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
             else
@@ -1304,7 +1354,7 @@ append_ports_to_env() {
         fi
 
         # Add MIX_SERVER_HOST only when Laravel Mix is installed
-        if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ] && is_laravel_mix_installed; then
+        if [ -n "$app_port" ] && is_laravel_mix_installed; then
             if [ "$DOMAIN_REGISTERED" = true ]; then
                 echo "MIX_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
             else
@@ -1313,8 +1363,8 @@ append_ports_to_env() {
         fi
 
         # Add port assignments in sorted order
-        for var_name in $(echo "${!PORT_ASSIGNMENTS[@]}" | tr ' ' '\n' | sort); do
-            echo "$var_name=${PORT_ASSIGNMENTS[$var_name]}"
+        for var_name in $(get_port_assignment_keys_sorted); do
+            echo "$var_name=$(get_port_assignment "$var_name")"
         done
 
         # Add blank line separator
@@ -1403,7 +1453,8 @@ prompt_domain_registration() {
 
     # Domain name and tool already validated during input collection
     local domain="$USER_DOMAIN_NAME"
-    local port="${PORT_ASSIGNMENTS[APP_PORT]}"
+    local port
+    port=$(get_port_assignment "APP_PORT")
 
     if [ -z "$port" ]; then
         log_error "APP_PORT not assigned. Cannot register proxy."
@@ -1900,8 +1951,13 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     fi
 
     # Step 14: Extract port variables from docker-compose.yml
-    local port_vars_output=$(extract_port_vars)
-    readarray -t port_vars_array <<< "$port_vars_output"
+    local port_vars_output
+    local port_vars_array=()
+    port_vars_output=$(extract_port_vars)
+    while IFS= read -r port_var; do
+        [ -z "$port_var" ] && continue
+        port_vars_array+=("$port_var")
+    done <<< "$port_vars_output"
     local num_port_vars=${#port_vars_array[@]}
     log_success "Extracted $num_port_vars port variable(s) from docker-compose.yml"
 
@@ -1920,7 +1976,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         local assigned_port=$(find_next_available_port "$start_port" "$var_name")
 
         # Store assignment
-        PORT_ASSIGNMENTS["$var_name"]="$assigned_port"
+        set_port_assignment "$var_name" "$assigned_port"
 
         # Log assignment
         if [ "$assigned_port" = "$start_port" ]; then
@@ -1969,8 +2025,12 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         else
             success_msg="$success_msg (APP_URL=http://${REGISTERED_DOMAIN}.${DOMAIN_TLD})"
         fi
-    elif [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
-        success_msg="$success_msg (APP_URL=http://localhost:${PORT_ASSIGNMENTS[APP_PORT]})"
+    else
+        local app_port
+        app_port=$(get_port_assignment "APP_PORT")
+        if [ -n "$app_port" ]; then
+            success_msg="$success_msg (APP_URL=http://localhost:${app_port})"
+        fi
     fi
     log_success "$success_msg"
 
@@ -2027,12 +2087,18 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
             echo -e "${DIM}  • cert.crt${NC}"
             echo -e "${DIM}  • cert.key${NC}"
             echo ""
-            echo -e "${DIM}Docker is listening on localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
-            echo -e "${DIM}Valet/Herd proxy: ${REGISTERED_DOMAIN}.${DOMAIN_TLD} → localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
-        elif [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
+            local app_port
+            app_port=$(get_port_assignment "APP_PORT")
+            echo -e "${DIM}Docker is listening on localhost:${app_port}${NC}"
+            echo -e "${DIM}Valet/Herd proxy: ${REGISTERED_DOMAIN}.${DOMAIN_TLD} → localhost:${app_port}${NC}"
+        else
+            local app_port
+            app_port=$(get_port_assignment "APP_PORT")
+            if [ -n "$app_port" ]; then
             echo ""
             echo -e "${BOLD}Your application should be accessible at:${NC}"
-            echo -e "  ${CYAN}http://localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
+            echo -e "  ${CYAN}http://localhost:${app_port}${NC}"
+            fi
         fi
     else
         echo ""

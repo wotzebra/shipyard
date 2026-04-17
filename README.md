@@ -15,6 +15,7 @@ Laravel Sail project setup tool with automatic port assignment, SSL certificates
 ## Requirements
 
 - **OS**: macOS, Linux, or Windows (with Git Bash or WSL)
+- **Bash**: Version 3.2 or newer
 - **Docker**: Docker Desktop installed and running
 - **Project**: Laravel Sail project with `docker-compose.yml`
 - **Optional**: Laravel Valet or Laravel Herd (for domain registration features)
