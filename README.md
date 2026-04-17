@@ -8,7 +8,7 @@ Laravel Sail project setup tool with automatic port assignment, SSL certificates
 - 🔍 **Port Conflict Detection** - Prevents conflicts with running services and other projects
 - 🌐 **Local Domain Registration** - Seamless integration with Valet/Herd
 - 🔒 **SSL Certificate Management** - Automatic SSL setup and symlinking
-- 📦 **Composer Installation** - Handles private repository authentication
+- 📦 **Composer Installation** - Uses a Docker-based Composer image and supports private repository authentication via `auth.json`
 - 🧙 **Interactive Setup Wizard** - Collects all input upfront, then runs unattended
 - 🔄 **Self-Updating** - Built-in update mechanism via `--update` flag
 
@@ -60,12 +60,12 @@ shipyard init
 
 The wizard will guide you through:
 
-1. **Composer Authentication** - Provide credentials for private repositories
+1. **Composer Authentication** - Provide credentials for private repositories (stored in project-local `auth.json`)
 2. **Port Assignment** - Automatic detection and conflict resolution
 3. **Domain Registration** (Optional) - Register a `.test` domain via Valet/Herd
 4. **Protocol Selection** (If domain registered) - Choose between HTTPS (secure) or HTTP
 5. **SSL Certificates** (If HTTPS selected) - Automatic certificate setup
-6. **Post-Setup Commands** (Optional) - Start containers and run Laravel setup
+6. **Post-Setup Commands** (Optional) - Start containers and run Composer setup
 
 ### Commands
 
@@ -116,12 +116,15 @@ The `domain`, `proxy_service`, and `proxy_secure` fields are optional and only p
    # Auto-assigned Docker Ports (via shipyard.sh)
    COMPOSE_PROJECT_NAME=project_name
    APP_URL=http://localhost:8000
-   VITE_SERVER_HOST=localhost
    ASSET_URL="${APP_URL}"
    APP_PORT=8000
    VITE_PORT=5100
    FORWARD_DB_PORT=3300
    ```
+
+   Additional host keys are added conditionally:
+   - `VITE_SERVER_HOST` when Vite is installed
+   - `MIX_SERVER_HOST` when Laravel Mix is installed
 
 ### Domain Registration (Valet/Herd)
 
@@ -306,6 +309,12 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ## Troubleshooting
 
+### Composer install fails on PHP 8.5 image
+
+**Cause:** The Sail PHP 8.5 composer image may not be available for your setup yet.
+
+**Solution:** Shipyard automatically falls back to the PHP 8.4 composer image for the initial `composer install` when it detects PHP 8.5 runtime configuration.
+
 ### "command not found: shipyard"
 
 **Cause:** `~/.local/bin` is not in your PATH.
@@ -354,7 +363,7 @@ docker system prune -f
 
 **Cause:** Port is in use by another service or project.
 
-**Solution:** Shipyard automatically handles this by incrementing to the next available port. No action needed.
+**Solution:** Shipyard automatically handles this by incrementing to the next available port and preventing duplicate assignments between `*_PORT` variables in the same run. No action needed.
 
 ### Project Already Registered
 

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Private Composer repository credentials are now written to project-local `auth.json` before dependency installation
+
+### Changed
+- Post-setup messaging now consistently refers to "Composer setup" instead of "Laravel setup"
+- Environment configuration now sets `VITE_SERVER_HOST` only when Vite is installed
+- Environment configuration now sets `MIX_SERVER_HOST` only when Laravel Mix is installed
+- Composer install now falls back to the PHP 8.4 Sail composer image when the detected runtime is PHP 8.5
+
+### Fixed
+- Port assignment now prevents assigning the same port to multiple `*_PORT` variables during the same `init` run
+
+### Removed
+- Removed unused domain registration helper code
+
 ## [0.3.3] - 2026-02-24
 
 ### Fixed

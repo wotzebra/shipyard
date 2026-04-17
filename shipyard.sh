@@ -585,6 +585,63 @@ detect_php_version() {
     fi
 }
 
+is_vite_installed() {
+    [ -f "package.json" ] && grep -q '"vite"' package.json
+}
+
+is_laravel_mix_installed() {
+    [ -f "package.json" ] && grep -q '"laravel-mix"' package.json
+}
+
+write_composer_auth_json() {
+    local repositories=($(extract_composer_repositories))
+
+    if [ ${#repositories[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    log_info "Writing auth.json with private repository credentials..."
+
+    # Build the http-basic JSON block
+    local http_basic_entries=""
+    local repo_index=0
+
+    for repo in "${repositories[@]}"; do
+        local username="${COMPOSER_REPO_USERNAMES[$repo_index]}"
+        local password="${COMPOSER_REPO_PASSWORDS[$repo_index]}"
+
+        if [ -n "$http_basic_entries" ]; then
+            http_basic_entries="$http_basic_entries,"$'\n'
+        fi
+        http_basic_entries="${http_basic_entries}        \"$repo\": {\"username\": \"$username\", \"password\": \"$password\"}"
+
+        repo_index=$((repo_index + 1))
+    done
+
+    cat > auth.json <<EOF
+{
+    "http-basic": {
+$http_basic_entries
+    }
+}
+EOF
+
+    log_success "auth.json written"
+
+    # Ensure auth.json is in .gitignore
+    if [ -f ".gitignore" ]; then
+        if ! grep -qxF "auth.json" .gitignore; then
+            echo "auth.json" >> .gitignore
+            log_success "auth.json added to .gitignore"
+        fi
+    else
+        echo "auth.json" > .gitignore
+        log_success ".gitignore created with auth.json"
+    fi
+
+    echo ""
+}
+
 run_composer_install() {
     echo ""
     log_info "=========================================="
@@ -594,67 +651,30 @@ run_composer_install() {
 
     # Detect PHP version from docker-compose.yml
     local php_version=$(detect_php_version)
-    local composer_image="laravelsail/php${php_version}-composer:latest"
+    local composer_php_version="$php_version"
 
-    log_info "Using PHP ${php_version:0:1}.${php_version:1} composer image: $composer_image"
-    echo ""
-
-    # Extract repositories from composer.json
-    local repositories=($(extract_composer_repositories))
-
-    if [ ${#repositories[@]} -eq 0 ]; then
-        log_info "No private repositories found in composer.json, running composer install..."
-        echo ""
-        docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w /var/www/html "$composer_image" composer install --ignore-platform-reqs
-
-        if [ $? -ne 0 ]; then
-            echo ""
-            log_error "Composer install failed."
-            exit 9
-        fi
-
-        log_success "Composer dependencies installed"
-        echo ""
-        return 0
+    # Use PHP 8.4 composer image when project runtime is 8.5 (see https://github.com/laravel/sail-server/pull/35)
+    if [ "$php_version" = "85" ]; then
+        composer_php_version="84"
     fi
 
-    log_info "Found ${#repositories[@]} private repository/repositories, configuring credentials..."
+    local composer_image="laravelsail/php${composer_php_version}-composer:latest"
+
+    if [ "$php_version" = "$composer_php_version" ]; then
+        log_info "Using PHP ${php_version:0:1}.${php_version:1} composer image: $composer_image"
+    else
+        log_info "Detected PHP ${php_version:0:1}.${php_version:1}; using PHP ${composer_php_version:0:1}.${composer_php_version:1} composer image: $composer_image"
+    fi
     echo ""
 
-    # Build the composer config commands using pre-collected credentials
-    local config_commands=""
-    local repo_index=0
-
-    for repo in "${repositories[@]}"; do
-        local username="${COMPOSER_REPO_USERNAMES[$repo_index]}"
-        local password="${COMPOSER_REPO_PASSWORDS[$repo_index]}"
-
-        # Add to config commands
-        if [ -n "$config_commands" ]; then
-            config_commands="$config_commands && "
-        fi
-        config_commands="${config_commands}composer config http-basic.$repo $username $password"
-
-        echo "  ✓ Using credentials for $repo"
-
-        repo_index=$((repo_index + 1))
-    done
-
-    # Run composer install with all credentials configured
-    echo ""
     log_info "Running composer install via Docker..."
     echo ""
 
-    local full_command="$config_commands && composer install --ignore-platform-reqs"
-
-    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w /var/www/html "$composer_image" bash -c "$full_command"
+    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w /var/www/html "$composer_image" composer install --ignore-platform-reqs
 
     if [ $? -ne 0 ]; then
         echo ""
         log_error "Composer install failed. Please check your credentials and try again."
-        echo ""
-        echo "Command that failed:"
-        echo "  docker run --rm -u \"\$(id -u):\$(id -g)\" -v \$(pwd):/var/www/html -w /var/www/html $composer_image bash -c \"$config_commands && composer install --ignore-platform-reqs\""
         exit 9
     fi
 
@@ -1173,6 +1193,13 @@ extract_port_vars() {
 is_port_available() {
     local port=$1
 
+    # Check ports already assigned in this run
+    for assigned_port in "${PORT_ASSIGNMENTS[@]}"; do
+        if [ "$assigned_port" = "$port" ]; then
+            return 1  # Already assigned to another variable this run
+        fi
+    done
+
     # Check registry first
     if is_port_in_registry "$port"; then
         return 1  # Port taken in registry
@@ -1251,7 +1278,7 @@ append_ports_to_env() {
         # Always add COMPOSE_PROJECT_NAME (normalized from path)
         echo "COMPOSE_PROJECT_NAME=$PROJECT_NAME"
 
-        # Add APP_URL based on domain registration or APP_PORT
+        # Add APP_URL and ASSET_URL only for Laravel projects
         if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
             if [ "$DOMAIN_REGISTERED" = true ]; then
                 # Use domain with protocol based on secure setting
@@ -1260,13 +1287,29 @@ append_ports_to_env() {
                 else
                     echo "APP_URL=http://${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
                 fi
-                echo "VITE_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
             else
                 # Fall back to localhost
                 echo "APP_URL=http://localhost:${PORT_ASSIGNMENTS[APP_PORT]}"
-                echo "VITE_SERVER_HOST=localhost"
             fi
             echo "ASSET_URL=\"\${APP_URL}\""
+        fi
+
+        # Add VITE_SERVER_HOST only when Vite is installed
+        if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ] && is_vite_installed; then
+            if [ "$DOMAIN_REGISTERED" = true ]; then
+                echo "VITE_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+            else
+                echo "VITE_SERVER_HOST=localhost"
+            fi
+        fi
+
+        # Add MIX_SERVER_HOST only when Laravel Mix is installed
+        if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ] && is_laravel_mix_installed; then
+            if [ "$DOMAIN_REGISTERED" = true ]; then
+                echo "MIX_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+            else
+                echo "MIX_SERVER_HOST=localhost"
+            fi
         fi
 
         # Add port assignments in sorted order
@@ -1277,13 +1320,14 @@ append_ports_to_env() {
         # Add blank line separator
         echo ""
 
-        # Copy existing .env content, but skip COMPOSE_PROJECT_NAME, APP_URL, ASSET_URL, and VITE_SERVER_HOST
+        # Copy existing .env content, but skip COMPOSE_PROJECT_NAME, APP_URL, ASSET_URL, VITE_SERVER_HOST, and MIX_SERVER_HOST
         while IFS= read -r line; do
             # Skip lines we're managing at the top
             if [[ ! "$line" =~ ^COMPOSE_PROJECT_NAME= ]] && \
                [[ ! "$line" =~ ^APP_URL= ]] && \
                [[ ! "$line" =~ ^ASSET_URL= ]] && \
-               [[ ! "$line" =~ ^VITE_SERVER_HOST= ]]; then
+               [[ ! "$line" =~ ^VITE_SERVER_HOST= ]] && \
+               [[ ! "$line" =~ ^MIX_SERVER_HOST= ]]; then
                 echo "$line"
             fi
         done < "$ENV_FILE"
@@ -1349,40 +1393,6 @@ check_existing_proxy() {
     # Check if domain exists in list
     echo "$existing_proxies" | grep -q "^${domain}$"
     return $?
-}
-
-register_domain_with_tool() {
-    local domain=$1
-    local port="${PORT_ASSIGNMENTS[APP_PORT]}"
-
-    if [ -z "$port" ]; then
-        log_error "APP_PORT not assigned. Cannot register proxy."
-        return 1
-    fi
-
-    local full_domain="${domain}.${DOMAIN_TLD}"
-    local proxy_target="http://localhost:${port}"
-
-    log_info "Registering proxy: $full_domain -> $proxy_target"
-
-    # Build proxy command with optional --secure flag
-    local proxy_cmd="$SELECTED_DEV_TOOL proxy \"$domain\" \"$proxy_target\""
-    if [ "$USE_SECURE_PROXY" = true ]; then
-        proxy_cmd="$proxy_cmd --secure"
-    fi
-
-    # Run the proxy command
-    if eval "$proxy_cmd" >/dev/null 2>&1; then
-        if [ "$USE_SECURE_PROXY" = true ]; then
-            log_success "Proxy created with SSL certificate"
-        else
-            log_success "Proxy created (HTTP)"
-        fi
-        return 0
-    else
-        log_error "$SELECTED_DEV_TOOL proxy command failed"
-        return 1
-    fi
 }
 
 prompt_domain_registration() {
@@ -1750,7 +1760,7 @@ collect_user_input() {
     echo ""
     echo -e "${DIM}After port assignment, these commands can be run:${NC}"
     echo -e "  ${DIM}1.${NC} Start Docker containers ${DIM}(vendor/bin/sail up -d)${NC}"
-    echo -e "  ${DIM}2.${NC} Run Laravel setup ${DIM}(vendor/bin/sail composer setup)${NC}"
+    echo -e "  ${DIM}2.${NC} Run Composer setup ${DIM}(vendor/bin/sail composer setup)${NC}"
     echo ""
     echo -n "Run these commands automatically? [Y/n]: "
     read -r RUN_POST_SETUP
@@ -1792,7 +1802,7 @@ collect_user_input() {
         fi
     fi
     if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
-        echo -e "  ${DIM}5.${NC} Start Docker containers and run Laravel setup"
+        echo -e "  ${DIM}5.${NC} Start Docker containers and run Composer setup"
     fi
     echo ""
     read -r -p "Continue with setup? [Y/n] " confirm
@@ -1862,7 +1872,8 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     # Step 8: Collect all user input upfront
     collect_user_input
 
-    # Step 9: Run composer install (non-interactive)
+    # Step 9: Write auth.json (when needed) and run composer install
+    write_composer_auth_json
     run_composer_install
 
     # Step 10: Validate/create .env file
@@ -1991,16 +2002,16 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         log_success "Docker containers started"
 
         echo ""
-        log_info "Step 2/2: Running Laravel setup (vendor/bin/sail composer setup)..."
+        log_info "Step 2/2: Running Composer setup (vendor/bin/sail composer setup)..."
         ./vendor/bin/sail composer setup
 
         if [ $? -ne 0 ]; then
             echo ""
-            log_error "Laravel setup failed. You may need to run this manually:"
+            log_error "Composer setup failed. You may need to run this manually:"
             echo "  ./vendor/bin/sail composer setup"
             exit 9
         fi
-        log_success "Laravel setup completed"
+        log_success "Composer setup completed"
 
         echo ""
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
