@@ -2051,7 +2051,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         echo -e "  ${DIM}1.${NC} ./vendor/bin/sail up -d"
         echo -e "  ${DIM}2.${NC} ./vendor/bin/sail composer setup"
     fi
- }
+}
 
 # ==============================================================================
 # ENTRY POINT
