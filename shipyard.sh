@@ -585,16 +585,8 @@ detect_php_version() {
     fi
 }
 
-is_laravel_project() {
-    [ -f "composer.json" ] && grep -q '"laravel/framework"' composer.json
-}
-
 is_vite_installed() {
     [ -f "package.json" ] && grep -q '"vite"' package.json
-}
-
-is_webpack_installed() {
-    [ -f "package.json" ] && grep -q '"webpack"' package.json
 }
 
 is_laravel_mix_installed() {
@@ -1276,7 +1268,7 @@ append_ports_to_env() {
         echo "COMPOSE_PROJECT_NAME=$PROJECT_NAME"
 
         # Add APP_URL and ASSET_URL only for Laravel projects
-        if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ] && is_laravel_project; then
+        if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
             if [ "$DOMAIN_REGISTERED" = true ]; then
                 # Use domain with protocol based on secure setting
                 if [ "$USE_SECURE_PROXY" = true ]; then
@@ -1300,15 +1292,6 @@ append_ports_to_env() {
             fi
         fi
 
-        # Add WEBPACK_SERVER_HOST only when Webpack is installed
-        if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ] && is_webpack_installed; then
-            if [ "$DOMAIN_REGISTERED" = true ]; then
-                echo "WEBPACK_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
-            else
-                echo "WEBPACK_SERVER_HOST=localhost"
-            fi
-        fi
-
         # Add MIX_SERVER_HOST only when Laravel Mix is installed
         if [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ] && is_laravel_mix_installed; then
             if [ "$DOMAIN_REGISTERED" = true ]; then
@@ -1326,14 +1309,13 @@ append_ports_to_env() {
         # Add blank line separator
         echo ""
 
-        # Copy existing .env content, but skip COMPOSE_PROJECT_NAME, APP_URL, ASSET_URL, VITE_SERVER_HOST, and WEBPACK_SERVER_HOST
+        # Copy existing .env content, but skip COMPOSE_PROJECT_NAME, APP_URL, ASSET_URL, VITE_SERVER_HOST, and MIX_SERVER_HOST
         while IFS= read -r line; do
             # Skip lines we're managing at the top
             if [[ ! "$line" =~ ^COMPOSE_PROJECT_NAME= ]] && \
                [[ ! "$line" =~ ^APP_URL= ]] && \
                [[ ! "$line" =~ ^ASSET_URL= ]] && \
                [[ ! "$line" =~ ^VITE_SERVER_HOST= ]] && \
-               [[ ! "$line" =~ ^WEBPACK_SERVER_HOST= ]] && \
                [[ ! "$line" =~ ^MIX_SERVER_HOST= ]]; then
                 echo "$line"
             fi
@@ -1996,7 +1978,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         echo "=========================================="
         echo ""
 
-        log_info "Step 1/2: Starting Docker containers..."
+        log_info "Step 1/2: Starting Docker containers (vendor/bin/sail up -d)..."
         ./vendor/bin/sail up -d
 
         if [ $? -ne 0 ]; then
@@ -2009,7 +1991,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         log_success "Docker containers started"
 
         echo ""
-        log_info "Step 2/2: Running Composer setup..."
+        log_info "Step 2/2: Running Composer setup (vendor/bin/sail composer setup)..."
         ./vendor/bin/sail composer setup
 
         if [ $? -ne 0 ]; then
