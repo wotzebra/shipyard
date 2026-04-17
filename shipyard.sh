@@ -1988,69 +1988,69 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     echo ""
     log_success "Project setup complete! Assigned $num_port_vars ports to '$PROJECT_NAME'."
 
-     # Step 20: Run post-setup commands (non-interactive)
-     if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
-         echo ""
-         echo "=========================================="
-         echo "Running post-setup commands..."
-         echo "=========================================="
-         echo ""
+    # Step 20: Run post-setup commands (non-interactive)
+    if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
+        echo ""
+        echo "=========================================="
+        echo "Running post-setup commands..."
+        echo "=========================================="
+        echo ""
 
-         log_info "Step 1/2: Starting Docker containers..."
-         ./vendor/bin/sail up -d
+        log_info "Step 1/2: Starting Docker containers..."
+        ./vendor/bin/sail up -d
 
-         if [ $? -ne 0 ]; then
-             echo ""
-             log_error "Failed to start Docker containers."
-             echo "You may need to run this manually:"
-             echo "  ./vendor/bin/sail up -d"
-             exit 9
-         fi
-         log_success "Docker containers started"
+        if [ $? -ne 0 ]; then
+            echo ""
+            log_error "Failed to start Docker containers."
+            echo "You may need to run this manually:"
+            echo "  ./vendor/bin/sail up -d"
+            exit 9
+        fi
+        log_success "Docker containers started"
 
-         echo ""
-         log_info "Step 2/2: Running Composer setup..."
-         ./vendor/bin/sail composer setup
+        echo ""
+        log_info "Step 2/2: Running Composer setup..."
+        ./vendor/bin/sail composer setup
 
-         if [ $? -ne 0 ]; then
-             echo ""
-             log_error "Composer setup failed. You may need to run this manually:"
-             echo "  ./vendor/bin/sail composer setup"
-             exit 9
-         fi
-         log_success "Composer setup completed"
+        if [ $? -ne 0 ]; then
+            echo ""
+            log_error "Composer setup failed. You may need to run this manually:"
+            echo "  ./vendor/bin/sail composer setup"
+            exit 9
+        fi
+        log_success "Composer setup completed"
 
-         echo ""
-         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-         echo -e "${GREEN}${BOLD}✓ All setup complete! 🎉${NC}"
-         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN}${BOLD}✓ All setup complete! 🎉${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
-         if [ "$DOMAIN_REGISTERED" = true ]; then
-             echo ""
-             echo -e "${BOLD}Your application is accessible at:${NC}"
-             echo -e "  ${CYAN}https://${REGISTERED_DOMAIN}.${DOMAIN_TLD}${NC}"
-             echo ""
-             echo -e "${DIM}SSL certificates are symlinked in ./${PROJECT_CERT_DIR}/${NC}"
-             echo -e "${DIM}  • cert.crt${NC}"
-             echo -e "${DIM}  • cert.key${NC}"
-             echo ""
-             echo -e "${DIM}Docker is listening on localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
-             echo -e "${DIM}Valet/Herd proxy: ${REGISTERED_DOMAIN}.${DOMAIN_TLD} → localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
-         elif [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
-             echo ""
-             echo -e "${BOLD}Your application should be accessible at:${NC}"
-             echo -e "  ${CYAN}http://localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
-         fi
-     else
-         echo ""
-         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-         echo -e "${YELLOW}Next steps: Start containers and run setup${NC}"
-         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-         echo ""
-         echo "To complete setup manually, run:"
-         echo -e "  ${DIM}1.${NC} ./vendor/bin/sail up -d"
-         echo -e "  ${DIM}2.${NC} ./vendor/bin/sail composer setup"
-     fi
+        if [ "$DOMAIN_REGISTERED" = true ]; then
+            echo ""
+            echo -e "${BOLD}Your application is accessible at:${NC}"
+            echo -e "  ${CYAN}https://${REGISTERED_DOMAIN}.${DOMAIN_TLD}${NC}"
+            echo ""
+            echo -e "${DIM}SSL certificates are symlinked in ./${PROJECT_CERT_DIR}/${NC}"
+            echo -e "${DIM}  • cert.crt${NC}"
+            echo -e "${DIM}  • cert.key${NC}"
+            echo ""
+            echo -e "${DIM}Docker is listening on localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
+            echo -e "${DIM}Valet/Herd proxy: ${REGISTERED_DOMAIN}.${DOMAIN_TLD} → localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
+        elif [ -n "${PORT_ASSIGNMENTS[APP_PORT]}" ]; then
+            echo ""
+            echo -e "${BOLD}Your application should be accessible at:${NC}"
+            echo -e "  ${CYAN}http://localhost:${PORT_ASSIGNMENTS[APP_PORT]}${NC}"
+        fi
+    else
+        echo ""
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${YELLOW}Next steps: Start containers and run setup${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo "To complete setup manually, run:"
+        echo -e "  ${DIM}1.${NC} ./vendor/bin/sail up -d"
+        echo -e "  ${DIM}2.${NC} ./vendor/bin/sail composer setup"
+    fi
  }
 
 # ==============================================================================
