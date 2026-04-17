@@ -80,8 +80,6 @@ declare -a COMPOSER_REPO_PASSWORDS=()
 REGISTER_DOMAIN=false
 USER_DOMAIN_NAME=""
 RUN_POST_SETUP=""
-BACKUP_FILE=""
-RESTORE_BEFORE_SETUP=true
 
 # ==============================================================================
 # COLORS & STYLING
@@ -601,163 +599,6 @@ is_webpack_installed() {
 
 is_laravel_mix_installed() {
     [ -f "package.json" ] && grep -q '"laravel-mix"' package.json
-}
-
-detect_db_service() {
-    # Look for a service using a mysql or mariadb image in docker-compose.yml
-    local service
-    service=$(awk '
-        /^services:/ { in_services=1; next }
-        in_services && /^[[:space:]]{2,4}[a-zA-Z0-9._-]+:[[:space:]]*$/ {
-            gsub(/[[:space:]]|:/, "", $0); current_service=$0
-        }
-        in_services && current_service && /image:[[:space:]]*(mysql|mariadb)/ {
-            print current_service; exit
-        }
-    ' "$COMPOSE_FILE")
-
-    if [ -z "$service" ]; then
-        echo "mysql"
-    else
-        echo "$service"
-    fi
-}
-
-wait_for_db() {
-    local db_service="$1"
-    local db_user="$2"
-    local db_pass="$3"
-    local db_name="$4"
-    local max_attempts=30
-    local attempt=0
-    local container_name
-
-    # Resolve the actual container name from the compose service
-    container_name=$(docker compose ps -q "$db_service" 2>/dev/null || docker-compose ps -q "$db_service" 2>/dev/null)
-
-    if [ -z "$container_name" ]; then
-        # Fall back to guessing the container name from the project + service
-        container_name="${PROJECT_NAME}-${db_service}-1"
-    fi
-
-    log_info "Waiting for database to be ready..."
-
-    while [ $attempt -lt $max_attempts ]; do
-        # Connect as the app user to the target database — this only succeeds once
-        # MySQL has finished initializing and the user grants have been applied.
-        if docker exec "$container_name" mysql -u"$db_user" -p"$db_pass" "$db_name" \
-            -e "SELECT 1;" >/dev/null 2>&1; then
-            log_success "Database is ready"
-            return 0
-        fi
-        attempt=$((attempt + 1))
-        echo -ne "  ${DIM}Attempt $attempt/$max_attempts...${NC}\r"
-        sleep 2
-    done
-
-    echo ""
-    log_error "Database did not become ready within $((max_attempts * 2)) seconds."
-    return 1
-}
-
-restore_database() {
-    local backup_file="$1"
-    local db_service
-    local db_name db_user db_pass
-    local container_name
-
-    db_service=$(detect_db_service)
-
-    # Read credentials from .env
-    db_name=$(grep -E '^DB_DATABASE=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
-    db_user=$(grep -E '^DB_USERNAME=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
-    db_pass=$(grep -E '^DB_PASSWORD=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
-
-    if [ -z "$db_name" ] || [ -z "$db_user" ]; then
-        log_error "Could not read DB_DATABASE or DB_USERNAME from .env — skipping restore."
-        echo -e "${DIM}Run the restore manually once the containers are up.${NC}"
-        return 1
-    fi
-
-    # Wait until MySQL is accepting connections as the app user
-    if ! wait_for_db "$db_service" "$db_user" "$db_pass" "$db_name"; then
-        echo ""
-        echo -e "${YELLOW}You can restore the database manually once MySQL is ready:${NC}"
-        _print_manual_restore_cmd "$backup_file" "$db_service" "$db_user" "$db_pass" "$db_name"
-        return 1
-    fi
-
-    # Resolve container name
-    container_name=$(docker compose ps -q "$db_service" 2>/dev/null || docker-compose ps -q "$db_service" 2>/dev/null)
-    if [ -z "$container_name" ]; then
-        container_name="${PROJECT_NAME}-${db_service}-1"
-    fi
-
-    log_info "Restoring database from: $(basename "$backup_file")..."
-
-    # Check for DEFINER references and strip them if present
-    local has_definer=false
-    # LC_ALL=C avoids "illegal byte sequence" on macOS sed with non-UTF8 dump files.
-    # The pattern covers: /*!50013 DEFINER=`user`@`host` SQL SECURITY DEFINER */
-    # as well as a bare: DEFINER=`user`@`host` on CREATE statements.
-    local sed_strip='s/\/\*![0-9]* DEFINER=`[^`]*`@`[^`]*`[^*]*\*\///g; s/DEFINER=`[^`]*`@`[^`]*` //g'
-
-    if [[ "$backup_file" == *.gz ]]; then
-        gunzip -c "$backup_file" | grep -qc "DEFINER" 2>/dev/null && has_definer=true
-    else
-        grep -qc "DEFINER" "$backup_file" 2>/dev/null && has_definer=true
-    fi
-
-    if [ "$has_definer" = true ]; then
-        log_info "DEFINER references detected — stripping before restore..."
-    fi
-
-    if [[ "$backup_file" == *.gz ]]; then
-        if [ "$has_definer" = true ]; then
-            echo -e "  ${DIM}$ gunzip -c \"$backup_file\" | sed '...' | docker exec -i $container_name mysql -u$db_user -p***** $db_name${NC}"
-            if ! gunzip -c "$backup_file" | LC_ALL=C sed "$sed_strip" | docker exec -i "$container_name" mysql -u"$db_user" -p"$db_pass" "$db_name"; then
-                log_error "Database restore failed."
-                return 1
-            fi
-        else
-            echo -e "  ${DIM}$ gunzip -c \"$backup_file\" | docker exec -i $container_name mysql -u$db_user -p***** $db_name${NC}"
-            if ! gunzip -c "$backup_file" | docker exec -i "$container_name" mysql -u"$db_user" -p"$db_pass" "$db_name"; then
-                log_error "Database restore failed."
-                return 1
-            fi
-        fi
-    else
-        if [ "$has_definer" = true ]; then
-            echo -e "  ${DIM}$ sed '...' \"$backup_file\" | docker exec -i $container_name mysql -u$db_user -p***** $db_name${NC}"
-            if ! LC_ALL=C sed "$sed_strip" "$backup_file" | docker exec -i "$container_name" mysql -u"$db_user" -p"$db_pass" "$db_name"; then
-                log_error "Database restore failed."
-                return 1
-            fi
-        else
-            echo -e "  ${DIM}$ docker exec -i $container_name mysql -u$db_user -p***** $db_name < \"$backup_file\"${NC}"
-            if ! docker exec -i "$container_name" mysql -u"$db_user" -p"$db_pass" "$db_name" < "$backup_file"; then
-                log_error "Database restore failed."
-                return 1
-            fi
-        fi
-    fi
-
-    log_success "Database restored successfully"
-}
-
-_print_manual_restore_cmd() {
-    local backup_file="$1"
-    local db_service="$2"
-    local db_user="$3"
-    local db_pass="$4"
-    local db_name="$5"
-    local container="${PROJECT_NAME}-${db_service}-1"
-
-    if [[ "$backup_file" == *.gz ]]; then
-        echo -e "  gunzip -c \"$backup_file\" | docker exec -i $container mysql -u$db_user -p$db_pass $db_name"
-    else
-        echo -e "  docker exec -i $container mysql -u$db_user -p$db_pass $db_name < \"$backup_file\""
-    fi
 }
 
 write_composer_auth_json() {
@@ -1561,40 +1402,6 @@ check_existing_proxy() {
     return $?
 }
 
-register_domain_with_tool() {
-    local domain=$1
-    local port="${PORT_ASSIGNMENTS[APP_PORT]}"
-
-    if [ -z "$port" ]; then
-        log_error "APP_PORT not assigned. Cannot register proxy."
-        return 1
-    fi
-
-    local full_domain="${domain}.${DOMAIN_TLD}"
-    local proxy_target="http://localhost:${port}"
-
-    log_info "Registering proxy: $full_domain -> $proxy_target"
-
-    # Build proxy command with optional --secure flag
-    local proxy_cmd="$SELECTED_DEV_TOOL proxy \"$domain\" \"$proxy_target\""
-    if [ "$USE_SECURE_PROXY" = true ]; then
-        proxy_cmd="$proxy_cmd --secure"
-    fi
-
-    # Run the proxy command
-    if eval "$proxy_cmd" >/dev/null 2>&1; then
-        if [ "$USE_SECURE_PROXY" = true ]; then
-            log_success "Proxy created with SSL certificate"
-        else
-            log_success "Proxy created (HTTP)"
-        fi
-        return 0
-    else
-        log_error "$SELECTED_DEV_TOOL proxy command failed"
-        return 1
-    fi
-}
-
 prompt_domain_registration() {
     # Check if user wants domain registration (already collected)
     if [ "$REGISTER_DOMAIN" = false ]; then
@@ -1966,69 +1773,6 @@ collect_user_input() {
     read -r RUN_POST_SETUP
     RUN_POST_SETUP=${RUN_POST_SETUP:-Y}
 
-    # 5. Ask about SQL backup restore
-    echo ""
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BOLD}🗄  Database Restore (optional)${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    echo -e "${DIM}Provide a path to a SQL backup file to restore into the database${NC}"
-    echo -e "${DIM}after the containers start. Supports plain .sql and gzipped .sql.gz files.${NC}"
-    echo ""
-
-    while true; do
-        echo -n "Path to SQL backup file [leave blank to skip]: "
-        read -r BACKUP_FILE
-
-        if [ -z "$BACKUP_FILE" ]; then
-            break
-        fi
-
-        # Strip surrounding single quotes and expand ~
-        BACKUP_FILE="${BACKUP_FILE#\'}"
-        BACKUP_FILE="${BACKUP_FILE%\'}"
-        BACKUP_FILE="${BACKUP_FILE/#\~/$HOME}"
-
-        if [ ! -f "$BACKUP_FILE" ]; then
-            echo -e "${YELLOW}File not found: $BACKUP_FILE${NC}"
-            echo -e "${DIM}Please enter a valid path or leave blank to skip.${NC}"
-            BACKUP_FILE=""
-            continue
-        fi
-
-        if [[ "$BACKUP_FILE" != *.sql && "$BACKUP_FILE" != *.sql.gz ]]; then
-            echo -e "${YELLOW}File must end in .sql or .sql.gz${NC}"
-            echo -e "${DIM}Please enter a valid backup file or leave blank to skip.${NC}"
-            BACKUP_FILE=""
-            continue
-        fi
-
-        log_success "Backup file: $BACKUP_FILE"
-        break
-    done
-
-    if [ -n "$BACKUP_FILE" ] && [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
-        echo ""
-        echo -e "${DIM}When should the database be restored?${NC}"
-        echo -e "  ${DIM}1.${NC} Before Composer setup ${DIM}(containers start → restore → composer setup)${NC}"
-        echo -e "  ${DIM}2.${NC} After Composer setup  ${DIM}(containers start → composer setup → restore)${NC}"
-        echo ""
-        echo -n "Select [1]: "
-        read -r restore_order
-        restore_order=${restore_order:-1}
-
-        case "$restore_order" in
-            2)
-                RESTORE_BEFORE_SETUP=false
-                log_success "Selected: restore after Composer setup"
-                ;;
-            *)
-                RESTORE_BEFORE_SETUP=true
-                log_success "Selected: restore before Composer setup"
-                ;;
-        esac
-    fi
-
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}${BOLD}✓ All user input collected!${NC}"
@@ -2046,15 +1790,6 @@ collect_user_input() {
         fi
     else
         echo -e "  ${DIM}•${NC} Domain: ${DIM}Not configured${NC}"
-    fi
-    if [ -n "$BACKUP_FILE" ]; then
-        if [ "$RESTORE_BEFORE_SETUP" = true ]; then
-            echo -e "  ${DIM}•${NC} DB restore: ${CYAN}$(basename "$BACKUP_FILE")${NC} ${DIM}(before Composer setup)${NC}"
-        else
-            echo -e "  ${DIM}•${NC} DB restore: ${CYAN}$(basename "$BACKUP_FILE")${NC} ${DIM}(after Composer setup)${NC}"
-        fi
-    else
-        echo -e "  ${DIM}•${NC} DB restore: ${DIM}Not configured${NC}"
     fi
     if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
         echo -e "  ${DIM}•${NC} Post-setup: ${GREEN}Auto-run enabled${NC}"
@@ -2074,11 +1809,7 @@ collect_user_input() {
         fi
     fi
     if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
-        if [ -n "$BACKUP_FILE" ]; then
-            echo -e "  ${DIM}5.${NC} Start Docker containers, restore database, and run Composer setup"
-        else
-            echo -e "  ${DIM}5.${NC} Start Docker containers and run Composer setup"
-        fi
+        echo -e "  ${DIM}5.${NC} Start Docker containers and run Composer setup"
     fi
     echo ""
     read -r -p "Continue with setup? [Y/n] " confirm
@@ -2265,11 +1996,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
          echo "=========================================="
          echo ""
 
-         # Determine total step count for progress display
-         local total_steps=2
-         [ -n "$BACKUP_FILE" ] && total_steps=3
-
-         log_info "Step 1/$total_steps: Starting Docker containers..."
+         log_info "Step 1/2: Starting Docker containers..."
          ./vendor/bin/sail up -d
 
          if [ $? -ne 0 ]; then
@@ -2281,17 +2008,8 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
          fi
          log_success "Docker containers started"
 
-         # Restore before composer setup if requested
-         if [ -n "$BACKUP_FILE" ] && [ "$RESTORE_BEFORE_SETUP" = true ]; then
-             echo ""
-             log_info "Step 2/$total_steps: Restoring database..."
-             restore_database "$BACKUP_FILE"
-         fi
-
          echo ""
-         local composer_step=2
-         [ -n "$BACKUP_FILE" ] && [ "$RESTORE_BEFORE_SETUP" = true ] && composer_step=3
-         log_info "Step $composer_step/$total_steps: Running Composer setup..."
+         log_info "Step 2/2: Running Composer setup..."
          ./vendor/bin/sail composer setup
 
          if [ $? -ne 0 ]; then
@@ -2301,13 +2019,6 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
              exit 9
          fi
          log_success "Composer setup completed"
-
-         # Restore after composer setup if requested
-         if [ -n "$BACKUP_FILE" ] && [ "$RESTORE_BEFORE_SETUP" = false ]; then
-             echo ""
-             log_info "Step 3/$total_steps: Restoring database..."
-             restore_database "$BACKUP_FILE"
-         fi
 
          echo ""
          echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -2339,15 +2050,6 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
          echo "To complete setup manually, run:"
          echo -e "  ${DIM}1.${NC} ./vendor/bin/sail up -d"
          echo -e "  ${DIM}2.${NC} ./vendor/bin/sail composer setup"
-         if [ -n "$BACKUP_FILE" ]; then
-             local db_service db_name db_user db_pass
-             db_service=$(detect_db_service)
-             db_name=$(grep -E '^DB_DATABASE=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
-             db_user=$(grep -E '^DB_USERNAME=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
-             db_pass=$(grep -E '^DB_PASSWORD=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
-             echo -e "  ${DIM}3.${NC} Restore the database backup:"
-             _print_manual_restore_cmd "$BACKUP_FILE" "$db_service" "$db_user" "$db_pass" "$db_name"
-         fi
      fi
  }
 
