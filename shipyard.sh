@@ -772,10 +772,51 @@ sanitize_project_name() {
     echo "$1" | tr '-' '_' | tr '.' '_'
 }
 
+add_registry_key() {
+    local project_sanitized=$1
+    local key=$2
+    local keys_var="registry_${project_sanitized}__keys"
+    local existing_keys
+
+    eval "existing_keys=\"\${$keys_var:-}\""
+
+    case " $existing_keys " in
+        *" $key "*) ;;
+        *)
+            if [ -n "$existing_keys" ]; then
+                existing_keys="$existing_keys $key"
+            else
+                existing_keys="$key"
+            fi
+            eval "$keys_var=\"\$existing_keys\""
+            ;;
+    esac
+}
+
+get_registry_keys() {
+    local project_sanitized=$1
+    local keys_var="registry_${project_sanitized}__keys"
+    local existing_keys
+
+    eval "existing_keys=\"\${$keys_var:-}\""
+
+    if [ -z "$existing_keys" ]; then
+        return 0
+    fi
+
+    printf '%s\n' $existing_keys
+}
+
 parse_ini_file() {
     # Reset global arrays so repeated calls don't accumulate duplicates
     REGISTRY_PROJECTS=()
     REGISTRY_ALL_PORTS=()
+
+    # Reset parsed registry variables from previous parse runs
+    local parsed_var
+    while IFS= read -r parsed_var; do
+        unset "$parsed_var"
+    done < <(compgen -v | grep '^registry_' || true)
 
     # If registry doesn't exist yet, that's OK (first run)
     if [ ! -f "$REGISTRY_FILE" ]; then
@@ -797,6 +838,7 @@ parse_ini_file() {
             current_section="${BASH_REMATCH[1]}"
             current_section_sanitized=$(sanitize_project_name "$current_section")
             REGISTRY_PROJECTS+=("$current_section")
+            eval "registry_${current_section_sanitized}__keys=''"
 
         # Key=value pair
         elif [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.+)[[:space:]]*$ ]]; then
@@ -811,6 +853,7 @@ parse_ini_file() {
             # Store in global variables with naming convention: registry_{project}_{key}
             # Use sanitized name for variable names
             eval "registry_${current_section_sanitized}_${key}=\"${value}\""
+            add_registry_key "$current_section_sanitized" "$key"
 
             # If this is a port value, add to all ports list
             if [[ "$key" =~ _PORT$ ]] && [[ "$value" =~ ^[0-9]+$ ]]; then
@@ -933,10 +976,9 @@ cleanup_stale_projects() {
     REGISTRY_ALL_PORTS=()
     for project in "${REGISTRY_PROJECTS[@]}"; do
         local project_sanitized=$(sanitize_project_name "$project")
-        local vars=$(compgen -v | grep "^registry_${project_sanitized}_" || true)
-        for var in $vars; do
-            local key="${var#registry_${project_sanitized}_}"
-            local value="${!var}"
+        for key in $(get_registry_keys "$project_sanitized"); do
+            local var="registry_${project_sanitized}_${key}"
+            local value="${!var:-}"
 
             # If this is a port value, add to all ports list
             if [[ "$key" =~ _PORT$ ]] && [[ "$value" =~ ^[0-9]+$ ]]; then
@@ -960,10 +1002,9 @@ cleanup_stale_projects() {
 
             # Get all variables for this project (use sanitized name)
             local project_sanitized=$(sanitize_project_name "$project")
-            local vars=$(compgen -v | grep "^registry_${project_sanitized}_" || true)
-            for var in $vars; do
-                local key="${var#registry_${project_sanitized}_}"
-                local value="${!var}"
+            for key in $(get_registry_keys "$project_sanitized"); do
+                local var="registry_${project_sanitized}_${key}"
+                local value="${!var:-}"
                 echo "$key=$value"
             done
 
@@ -1068,15 +1109,16 @@ run_list_command() {
 
         # Show all port variables dynamically
         local ports=()
-        while IFS= read -r varname; do
-            if [[ "$varname" =~ ^registry_${project_sanitized}_(.+_PORT)$ ]]; then
-                local port_name="${BASH_REMATCH[1]}"
-                local port_value="${!varname}"
+        for key in $(get_registry_keys "$project_sanitized"); do
+            if [[ "$key" =~ _PORT$ ]]; then
+                local port_name="$key"
+                local varname="registry_${project_sanitized}_${key}"
+                local port_value="${!varname:-}"
                 if [ -n "$port_value" ]; then
                     ports+=("${port_name}:${port_value}")
                 fi
             fi
-        done < <(compgen -v "registry_${project_sanitized}_")
+        done
 
         if [ ${#ports[@]} -gt 0 ]; then
             echo "  Ports:"
@@ -1172,10 +1214,9 @@ save_registry() {
 
             # Get all variables for this project (use sanitized name)
             local project_sanitized=$(sanitize_project_name "$project")
-            local vars=$(compgen -v | grep "^registry_${project_sanitized}_" || true)
-            for var in $vars; do
-                local key="${var#registry_${project_sanitized}_}"
-                local value="${!var}"
+            for key in $(get_registry_keys "$project_sanitized"); do
+                local var="registry_${project_sanitized}_${key}"
+                local value="${!var:-}"
                 echo "$key=$value"
             done
 

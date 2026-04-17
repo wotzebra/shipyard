@@ -16,10 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Environment configuration now sets `MIX_SERVER_HOST` only when Laravel Mix is installed
 - Composer install now falls back to the PHP 8.4 Sail composer image when the detected runtime is PHP 8.5
 - Script internals were refactored to remove Bash 4-only features, enabling Bash 3.2 compatibility
+- Registry read/write internals now track project keys explicitly instead of discovering them dynamically from shell variables
 
 ### Fixed
 - Port assignment now prevents assigning the same port to multiple `*_PORT` variables during the same `init` run
 - Script now exits early with a clear error when running on Bash versions older than 3.2
+- Registry parsing now clears previously loaded `registry_*` variables before each parse to prevent stale metadata from leaking between runs
 
 ### Removed
 - Removed unused domain registration helper code
