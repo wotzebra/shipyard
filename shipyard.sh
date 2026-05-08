@@ -84,6 +84,7 @@ USE_SECURE_PROXY=true  # Whether to use --secure flag for HTTPS
 # User input collection (collected upfront)
 declare -a COMPOSER_REPO_USERNAMES=()
 declare -a COMPOSER_REPO_PASSWORDS=()
+GITHUB_OAUTH_TOKEN=""
 REGISTER_DOMAIN=false
 USER_DOMAIN_NAME=""
 RUN_POST_SETUP=""
@@ -564,6 +565,20 @@ extract_composer_repositories() {
     grep -A 2 '"type".*"composer"' composer.json | grep '"url"' | sed -E 's/.*"url"[[:space:]]*:[[:space:]]*"https?:\/\/([^"]+)".*/\1/'
 }
 
+extract_composer_github_vcs_repos() {
+    # Extract VCS-type repository URLs pointing to github.com from composer.json.
+    # Matches both HTTPS (https://github.com/...) and SSH (git@github.com:...) forms.
+    # GitHub VCS repos require a github-oauth token in auth.json when private.
+    if [ ! -f "composer.json" ]; then
+        return
+    fi
+
+    grep -A 2 '"type"[[:space:]]*:[[:space:]]*"vcs"' composer.json \
+        | grep '"url"' \
+        | sed -E 's/.*"url"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' \
+        | grep -E '(https?://github\.com/|git@github\.com:)' || true
+}
+
 detect_php_version() {
     # Detect PHP version from docker-compose.yml
     # Looks for patterns like: ./vendor/laravel/sail/runtimes/8.4 or sail-8.4/app
@@ -602,8 +617,17 @@ is_laravel_mix_installed() {
 
 write_composer_auth_json() {
     local repositories=($(extract_composer_repositories))
+    local has_http_basic=0
+    local has_github_oauth=0
 
-    if [ ${#repositories[@]} -eq 0 ]; then
+    if [ ${#COMPOSER_REPO_USERNAMES[@]} -gt 0 ]; then
+        has_http_basic=1
+    fi
+    if [ -n "$GITHUB_OAUTH_TOKEN" ]; then
+        has_github_oauth=1
+    fi
+
+    if [ "$has_http_basic" -eq 0 ] && [ "$has_github_oauth" -eq 0 ]; then
         return 0
     fi
 
@@ -625,11 +649,26 @@ write_composer_auth_json() {
         repo_index=$((repo_index + 1))
     done
 
+    # Assemble the JSON sections
+    local sections=""
+    if [ "$has_http_basic" -eq 1 ]; then
+        sections="    \"http-basic\": {
+$http_basic_entries
+    }"
+    fi
+    if [ "$has_github_oauth" -eq 1 ]; then
+        if [ -n "$sections" ]; then
+            sections="$sections,
+"
+        fi
+        sections="${sections}    \"github-oauth\": {
+        \"github.com\": \"$GITHUB_OAUTH_TOKEN\"
+    }"
+    fi
+
     cat > auth.json <<EOF
 {
-    "http-basic": {
-$http_basic_entries
-    }
+$sections
 }
 EOF
 
@@ -1708,6 +1747,35 @@ collect_user_input() {
         done
     fi
 
+    # 1b. Collect GitHub OAuth token for private VCS repositories on github.com
+    local github_vcs_repos=($(extract_composer_github_vcs_repos))
+
+    if [ ${#github_vcs_repos[@]} -gt 0 ]; then
+        echo ""
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${BOLD}🔑 GitHub OAuth Token${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo -e "Found ${BOLD}${#github_vcs_repos[@]}${NC} GitHub VCS repository/repositories in composer.json:"
+        for repo in "${github_vcs_repos[@]}"; do
+            echo -e "  ${DIM}•${NC} $repo"
+        done
+        echo ""
+        echo -e "${DIM}If any of these are private, Composer needs a GitHub OAuth token.${NC}"
+        echo -e "${DIM}Create one at: https://github.com/settings/tokens (scope: repo)${NC}"
+        echo ""
+        echo -n "  GitHub OAuth token (input hidden, leave empty to skip): "
+        read -s -r GITHUB_OAUTH_TOKEN
+        echo ""
+
+        if [ -n "$GITHUB_OAUTH_TOKEN" ]; then
+            log_success "GitHub OAuth token stored"
+        else
+            log_warning "No GitHub OAuth token provided — private GitHub VCS repos may fail to install"
+        fi
+        echo ""
+    fi
+
     # 2. Detect available local dev tools (Valet/Herd)
     detect_local_dev_tools
 
@@ -1866,6 +1934,9 @@ collect_user_input() {
     echo -e "${BOLD}Configuration Summary:${NC}"
     if [ ${#COMPOSER_REPO_USERNAMES[@]} -gt 0 ]; then
         echo -e "  ${DIM}•${NC} Private repositories: ${BOLD}${#COMPOSER_REPO_USERNAMES[@]}${NC} configured"
+    fi
+    if [ -n "$GITHUB_OAUTH_TOKEN" ]; then
+        echo -e "  ${DIM}•${NC} GitHub OAuth token: ${GREEN}configured${NC}"
     fi
     if [ "$REGISTER_DOMAIN" = true ]; then
         if [ "$USE_SECURE_PROXY" = true ]; then
