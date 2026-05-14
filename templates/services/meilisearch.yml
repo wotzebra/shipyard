@@ -1,0 +1,11 @@
+    meilisearch:
+        image: 'getmeili/meilisearch:{{MEILISEARCH_VERSION}}'
+        ports:
+            - '${FORWARD_MEILISEARCH_PORT:-{{FORWARD_MEILISEARCH_PORT}}}:7700'
+        environment:
+            MEILI_NO_ANALYTICS: '${MEILISEARCH_NO_ANALYTICS:-false}'
+        volumes:
+            - 'meilisearch:/meili_data'
+# === SHIPYARD:VOLUME ===
+    meilisearch:
+        driver: local

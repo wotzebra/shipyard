@@ -1,0 +1,13 @@
+    elasticsearch:
+        image: 'docker.elastic.co/elasticsearch/elasticsearch:{{ELASTICSEARCH_VERSION}}'
+        ports:
+            - '${FORWARD_ELASTICSEARCH_PORT:-{{FORWARD_ELASTICSEARCH_PORT}}}:9200'
+        environment:
+            discovery.type: 'single-node'
+            xpack.security.enabled: 'false'
+            ES_JAVA_OPTS: '-Xms512m -Xmx512m'
+        volumes:
+            - 'elasticsearch:/usr/share/elasticsearch/data'
+# === SHIPYARD:VOLUME ===
+    elasticsearch:
+        driver: local
