@@ -43,6 +43,7 @@ readonly EXIT_DOCKER_NOT_INSTALLED=10
 readonly EXIT_DOCKER_NOT_RUNNING=11
 readonly EXIT_ENV_ALREADY_CONFIGURED=12
 readonly EXIT_TEMPLATE_FETCH_FAILED=13
+readonly EXIT_CAKE_LAYOUT_NOT_FOUND=14
 readonly EXIT_USER_CANCELLED=130
 
 # File paths
@@ -81,6 +82,14 @@ SELECTED_MYSQL_VERSION=""
 OPTIONAL_SERVICES=""
 MEILISEARCH_VERSION=""
 ELASTICSEARCH_VERSION=""
+
+# CakePHP 2 state (resolved during cakephp-2 scaffolding)
+CAKE_CONFIG_DIR=""        # "app/Config" or "Config"
+NGINX_DOCROOT=""          # e.g. "public_html", "app/webroot", "webroot"
+CAKE_SOURCE_ENV_FOLDER="" # absolute or relative path to the env folder being cloned
+
+# Files that were created or patched during init — printed at end as a review checklist
+declare -a REVIEW_FILES=()
 
 # Domain registration state
 DOMAIN_REGISTERED=false
@@ -138,6 +147,10 @@ log_success() {
 
 log_error() {
     echo -e "${RED}Error:${NC} $1" >&2
+}
+
+log_warning() {
+    echo -e "${YELLOW}Warning:${NC} $1" >&2
 }
 
 exit_with_error() {
@@ -550,8 +563,10 @@ validate_env_file() {
             log_info "Creating .env from .env.example..."
             cp .env.example "$ENV_FILE"
             log_success ".env file created from .env.example"
-        elif [ "$PRESET" = "laravel-legacy" ]; then
-            # Pre-Sail Laravel projects often have no .env.example. Start fresh.
+        elif [ "$PRESET" = "laravel-legacy" ] || [ "$PRESET" = "cakephp-2" ]; then
+            # Pre-Sail Laravel projects often have no .env.example, and Cake 2
+            # predates .env entirely. Either way, start fresh so COMPOSE_PROJECT_NAME
+            # and the assigned port vars have somewhere to land.
             log_info "No .env or .env.example — creating empty .env"
             : > "$ENV_FILE"
             log_success "Empty .env file created"
@@ -1957,6 +1972,7 @@ _substitute_template_vars() {
     content="${content//\{\{MYSQL_VERSION\}\}/$SELECTED_MYSQL_VERSION}"
     content="${content//\{\{MEILISEARCH_VERSION\}\}/$MEILISEARCH_VERSION}"
     content="${content//\{\{ELASTICSEARCH_VERSION\}\}/$ELASTICSEARCH_VERSION}"
+    content="${content//\{\{NGINX_DOCROOT\}\}/$NGINX_DOCROOT}"
 
     local port_var port_val
     for port_var in APP_PORT FORWARD_DB_PORT FORWARD_REDIS_PORT FORWARD_MAILPIT_PORT \
@@ -2058,6 +2074,13 @@ compute_legacy_port_vars() {
 scaffold_stack() {
     local preset="$1"
 
+    # cake-2 needs the project layout + docroot resolved before nginx.conf is
+    # substituted, since the docroot lands in the nginx template.
+    if [ "$preset" = "cakephp-2" ]; then
+        detect_cake_config_dir
+        prompt_cake_docroot
+    fi
+
     echo ""
     log_info "Scaffolding $preset stack..."
 
@@ -2076,15 +2099,314 @@ scaffold_stack() {
         exit_with_error $EXIT_TEMPLATE_FETCH_FAILED "Failed to write $COMPOSE_FILE"
     fi
     log_success "Wrote $COMPOSE_FILE"
+    REVIEW_FILES+=("$COMPOSE_FILE")
 
     fetch_template "${preset}/Dockerfile" "Dockerfile"
     log_success "Wrote Dockerfile"
+    REVIEW_FILES+=("Dockerfile")
 
     fetch_template "${preset}/nginx.conf" "nginx.conf"
     log_success "Wrote nginx.conf"
+    REVIEW_FILES+=("nginx.conf")
 
     fetch_template "${preset}/php.ini" "php.ini"
     log_success "Wrote php.ini"
+    REVIEW_FILES+=("php.ini")
+
+    # cake-2 specific: clone an existing env folder, patch the docker bits,
+    # and generate the per-machine local.php selector.
+    if [ "$preset" = "cakephp-2" ]; then
+        scaffold_cakephp_env
+    fi
+}
+
+# ==============================================================================
+# CAKEPHP 2 SCAFFOLDING HELPERS
+# ==============================================================================
+
+detect_cake_config_dir() {
+    if [ -d "app/Config" ]; then
+        CAKE_CONFIG_DIR="app/Config"
+    elif [ -d "Config" ]; then
+        CAKE_CONFIG_DIR="Config"
+    else
+        exit_with_error $EXIT_CAKE_LAYOUT_NOT_FOUND \
+            "CakePHP 2 layout not found.
+Expected either 'app/Config/' or 'Config/' in: $(pwd)
+Are you running 'shipyard init' from the project root?"
+    fi
+    log_success "Found CakePHP 2 config dir: $CAKE_CONFIG_DIR"
+}
+
+prompt_cake_docroot() {
+    # Callers can pre-seed NGINX_DOCROOT (handy for tests/automation).
+    if [ -n "$NGINX_DOCROOT" ]; then
+        log_success "Using preset docroot: $NGINX_DOCROOT"
+        return
+    fi
+
+    local candidates=("public_html" "app/webroot" "webroot")
+    local detected=""
+    local c
+    for c in "${candidates[@]}"; do
+        if [ -d "$c" ]; then
+            detected="$c"
+            break
+        fi
+    done
+
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}📂 Web Document Root${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+
+    if [ -n "$detected" ]; then
+        echo -e "${DIM}Detected docroot:${NC} ${BOLD}$detected${NC}"
+        echo -n "Use this? [Y/n]: "
+        local response
+        read -r response
+        response=${response:-Y}
+        if [[ "$response" =~ ^[Yy]$ ]]; then
+            NGINX_DOCROOT="$detected"
+            log_success "Docroot: $NGINX_DOCROOT"
+            return
+        fi
+    else
+        log_warning "No standard docroot found (looked for: ${candidates[*]})"
+    fi
+
+    while true; do
+        echo -n "Docroot path (relative to project root): "
+        read -r NGINX_DOCROOT
+        if [ -z "$NGINX_DOCROOT" ]; then
+            echo -e "${YELLOW}Docroot cannot be empty.${NC}"
+            continue
+        fi
+        if [ ! -d "$NGINX_DOCROOT" ]; then
+            log_warning "Path '$NGINX_DOCROOT' does not exist yet — accepting anyway."
+        fi
+        log_success "Docroot: $NGINX_DOCROOT"
+        break
+    done
+}
+
+# Find a source env folder under CAKE_CONFIG_DIR. Prefers `dev/`, otherwise
+# picks the first folder containing bootstrap.php + database.php (excluding
+# the destination `docker/`).
+detect_cake_source_env() {
+    local dev="$CAKE_CONFIG_DIR/dev"
+    if [ -d "$dev" ] && [ -f "$dev/bootstrap.php" ] && [ -f "$dev/database.php" ]; then
+        CAKE_SOURCE_ENV_FOLDER="$dev"
+        log_success "Source env folder: $CAKE_SOURCE_ENV_FOLDER"
+        return
+    fi
+
+    local entry name
+    for entry in "$CAKE_CONFIG_DIR"/*/; do
+        [ -d "$entry" ] || continue
+        name=$(basename "$entry")
+        if [ "$name" = "docker" ]; then
+            continue
+        fi
+        if [ -f "${entry}bootstrap.php" ] && [ -f "${entry}database.php" ]; then
+            CAKE_SOURCE_ENV_FOLDER="${entry%/}"
+            log_success "Source env folder: $CAKE_SOURCE_ENV_FOLDER (fallback, no dev/)"
+            return
+        fi
+    done
+
+    exit_with_error $EXIT_CAKE_LAYOUT_NOT_FOUND \
+        "No source env folder found under $CAKE_CONFIG_DIR/.
+Expected at least one subfolder (e.g. dev/) containing bootstrap.php + database.php to clone from."
+}
+
+# If docker/ already exists, prompt overwrite. Aborts on decline.
+check_cake_docker_dest() {
+    local dest="$CAKE_CONFIG_DIR/docker"
+    if [ -d "$dest" ]; then
+        echo ""
+        log_warning "$dest already exists."
+        echo -n "Overwrite it with a fresh clone of $CAKE_SOURCE_ENV_FOLDER? [y/N]: "
+        local response
+        read -r response
+        response=${response:-N}
+        if [[ ! "$response" =~ ^[Yy]$ ]]; then
+            exit_with_error $EXIT_USER_CANCELLED \
+                "Aborted: $dest already exists and overwrite declined."
+        fi
+        rm -rf "$dest"
+    fi
+}
+
+clone_cake_env_folder() {
+    local dest="$CAKE_CONFIG_DIR/docker"
+    cp -R "$CAKE_SOURCE_ENV_FOLDER" "$dest"
+    log_success "Cloned $CAKE_SOURCE_ENV_FOLDER → $dest"
+}
+
+# Patch the cloned database.php: rewrite host/login/password/database in $default.
+patch_cake_database_php() {
+    local file="$CAKE_CONFIG_DIR/docker/database.php"
+    if [ ! -f "$file" ]; then
+        return
+    fi
+
+    local tmp="${file}.shipyard.tmp"
+    awk -v project="$PROJECT_NAME" '
+        BEGIN { in_default = 0 }
+        /^[[:space:]]*public[[:space:]]+\$default[[:space:]]*=[[:space:]]*array[[:space:]]*\(/ {
+            in_default = 1
+            print
+            next
+        }
+        in_default {
+            if ($0 ~ /^[[:space:]]*\)[[:space:]]*;/) {
+                in_default = 0
+                print
+                next
+            }
+            if ($0 ~ /\047host\047[[:space:]]*=>/) {
+                sub(/\047host\047[[:space:]]*=>[[:space:]]*\047[^\047]*\047/, "\047host\047 => \047mysql\047", $0)
+            }
+            if ($0 ~ /\047login\047[[:space:]]*=>/) {
+                sub(/\047login\047[[:space:]]*=>[[:space:]]*\047[^\047]*\047/, "\047login\047 => \047sail\047", $0)
+            }
+            if ($0 ~ /\047password\047[[:space:]]*=>/) {
+                sub(/\047password\047[[:space:]]*=>[[:space:]]*\047[^\047]*\047/, "\047password\047 => \047password\047", $0)
+            }
+            if ($0 ~ /\047database\047[[:space:]]*=>/) {
+                sub(/\047database\047[[:space:]]*=>[[:space:]]*\047[^\047]*\047/, "\047database\047 => \047" project "\047", $0)
+            }
+            print
+            next
+        }
+        { print }
+    ' "$file" > "$tmp"
+    mv "$tmp" "$file"
+    log_success "Patched $file"
+    REVIEW_FILES+=("$file")
+}
+
+# Patch the cloned email.php: rewrite host → mailpit and port → 1025 wherever
+# they appear as array keys. (Email files often have multiple transport blocks.)
+patch_cake_email_php() {
+    local file="$CAKE_CONFIG_DIR/docker/email.php"
+    if [ ! -f "$file" ]; then
+        return
+    fi
+
+    local tmp="${file}.shipyard.tmp"
+    awk '
+        {
+            if ($0 ~ /\047host\047[[:space:]]*=>/) {
+                sub(/\047host\047[[:space:]]*=>[[:space:]]*\047[^\047]*\047/, "\047host\047 => \047mailpit\047", $0)
+            }
+            if ($0 ~ /\047port\047[[:space:]]*=>/) {
+                sub(/\047port\047[[:space:]]*=>[[:space:]]*[0-9]+/, "\047port\047 => 1025", $0)
+                sub(/\047port\047[[:space:]]*=>[[:space:]]*\047[^\047]*\047/, "\047port\047 => 1025", $0)
+            }
+            print
+        }
+    ' "$file" > "$tmp"
+    mv "$tmp" "$file"
+    log_success "Patched $file"
+    REVIEW_FILES+=("$file")
+}
+
+# Patch SITE_URL define + the first 'url' => 'http(s)://...' entry per file
+# (the latter catches the Site.url in config.php). Best-effort — surfaced in
+# the review summary so the user can verify.
+patch_cake_site_url() {
+    local file="$1"
+    if [ ! -f "$file" ]; then
+        return
+    fi
+
+    local target="http://${PROJECT_NAME}.test/"
+    local tmp="${file}.shipyard.tmp"
+
+    awk -v target="$target" '
+        BEGIN { url_patched = 0 }
+        {
+            if ($0 ~ /define[[:space:]]*\([[:space:]]*\047SITE_URL\047[[:space:]]*,/) {
+                sub(/define[[:space:]]*\([[:space:]]*\047SITE_URL\047[[:space:]]*,[[:space:]]*\047[^\047]*\047[[:space:]]*\)/, "define(\047SITE_URL\047, \047" target "\047)", $0)
+            }
+            if (!url_patched && $0 ~ /\047url\047[[:space:]]*=>[[:space:]]*\047https?:\/\//) {
+                sub(/\047url\047[[:space:]]*=>[[:space:]]*\047[^\047]*\047/, "\047url\047 => \047" target "\047", $0)
+                url_patched = 1
+            }
+            print
+        }
+    ' "$file" > "$tmp"
+    mv "$tmp" "$file"
+    log_success "Patched $file"
+    REVIEW_FILES+=("$file")
+}
+
+# Generate (or prompt overwrite) of app/Config/local.php — the per-machine
+# selector that points CakePHP at the docker env folder.
+write_cake_local_php() {
+    local file="$CAKE_CONFIG_DIR/local.php"
+    local content
+    content="<?php
+Configure::write('env', 'docker');
+
+define('SITE_URL', 'http://${PROJECT_NAME}.test/');
+
+include Configure::read('env') . '/bootstrap.php';
+"
+
+    if [ -f "$file" ]; then
+        echo ""
+        log_warning "$file already exists."
+        echo -n "Overwrite with the docker selector? [y/N]: "
+        local response
+        read -r response
+        response=${response:-N}
+        if [[ ! "$response" =~ ^[Yy]$ ]]; then
+            log_info "Keeping existing $file. To switch to docker manually, set:"
+            echo -e "  ${DIM}Configure::write('env', 'docker');${NC}"
+            return
+        fi
+    fi
+
+    printf '%s' "$content" > "$file"
+    log_success "Wrote $file"
+    REVIEW_FILES+=("$file")
+}
+
+# Orchestrate the cake-2 env folder clone + patch + local.php generation.
+scaffold_cakephp_env() {
+    detect_cake_source_env
+    check_cake_docker_dest
+    clone_cake_env_folder
+    patch_cake_database_php
+    patch_cake_email_php
+    patch_cake_site_url "$CAKE_CONFIG_DIR/docker/bootstrap.php"
+    patch_cake_site_url "$CAKE_CONFIG_DIR/docker/config.php"
+    write_cake_local_php
+}
+
+# Print the review-these-files block at end of init. No-op if nothing tracked.
+print_review_summary() {
+    if [ ${#REVIEW_FILES[@]} -eq 0 ]; then
+        return
+    fi
+
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}📋 Review checklist${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${DIM}Shipyard created or patched the files below. Skim them before${NC}"
+    echo -e "${DIM}committing — auto-patches are best-effort and may need touch-ups.${NC}"
+    echo ""
+    local f
+    for f in "${REVIEW_FILES[@]}"; do
+        echo -e "  ${DIM}•${NC} $f"
+    done
+    echo ""
 }
 
 # ==============================================================================
@@ -2394,8 +2716,8 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
 
     # Step 15.5: For legacy presets, scaffold the docker stack now that ports
     # are assigned. Sail keeps its existing compose file untouched.
-    if [ "$PRESET" = "laravel-legacy" ]; then
-        scaffold_stack laravel-legacy
+    if [ "$PRESET" != "sail" ]; then
+        scaffold_stack "$PRESET"
         echo ""
     fi
 
@@ -2521,6 +2843,8 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         echo -e "  ${DIM}1.${NC} ./vendor/bin/sail up -d"
         echo -e "  ${DIM}2.${NC} ./vendor/bin/sail composer setup"
     fi
+
+    print_review_summary
 }
 
 # ==============================================================================
