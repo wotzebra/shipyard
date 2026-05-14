@@ -42,6 +42,7 @@ readonly EXIT_REGISTRY_CORRUPTED=9
 readonly EXIT_DOCKER_NOT_INSTALLED=10
 readonly EXIT_DOCKER_NOT_RUNNING=11
 readonly EXIT_ENV_ALREADY_CONFIGURED=12
+readonly EXIT_TEMPLATE_FETCH_FAILED=13
 readonly EXIT_USER_CANCELLED=130
 
 # File paths
@@ -549,6 +550,11 @@ validate_env_file() {
             log_info "Creating .env from .env.example..."
             cp .env.example "$ENV_FILE"
             log_success ".env file created from .env.example"
+        elif [ "$PRESET" = "laravel-legacy" ]; then
+            # Pre-Sail Laravel projects often have no .env.example. Start fresh.
+            log_info "No .env or .env.example — creating empty .env"
+            : > "$ENV_FILE"
+            log_success "Empty .env file created"
         else
             exit_with_error $EXIT_ENV_NOT_FOUND \
                 ".env file not found and .env.example does not exist.
@@ -1922,6 +1928,166 @@ collect_user_input() {
 }
 
 # ==============================================================================
+# PRESET SCAFFOLDING FUNCTIONS
+# ==============================================================================
+
+# Internal: fetch a template file from GitHub and return its raw content on stdout.
+# Hard-fails the script if the fetch errors out (no offline fallback).
+_fetch_raw_template() {
+    local rel="$1"
+    local ref="${SHIPYARD_TEMPLATE_REF:-v$VERSION}"
+    local url="https://raw.githubusercontent.com/wotzebra/shipyard/${ref}/templates/${rel}"
+    local content
+    if ! content=$(curl -fsSL "$url" 2>/dev/null); then
+        exit_with_error $EXIT_TEMPLATE_FETCH_FAILED \
+            "Failed to fetch template: $url
+Set SHIPYARD_TEMPLATE_REF to a branch/tag where the file exists, or check your network."
+    fi
+    printf '%s' "$content"
+}
+
+# Internal: substitute the global {{VAR}} placeholders in a template body.
+# Port placeholders are resolved via get_port_assignment so they must already
+# be assigned before this runs.
+_substitute_template_vars() {
+    local content="$1"
+
+    content="${content//\{\{PROJECT_NAME\}\}/$PROJECT_NAME}"
+    content="${content//\{\{PHP_VERSION\}\}/$SELECTED_PHP_VERSION}"
+    content="${content//\{\{MYSQL_VERSION\}\}/$SELECTED_MYSQL_VERSION}"
+    content="${content//\{\{MEILISEARCH_VERSION\}\}/$MEILISEARCH_VERSION}"
+    content="${content//\{\{ELASTICSEARCH_VERSION\}\}/$ELASTICSEARCH_VERSION}"
+
+    local port_var port_val
+    for port_var in APP_PORT FORWARD_DB_PORT FORWARD_REDIS_PORT FORWARD_MAILPIT_PORT \
+                    FORWARD_MEILISEARCH_PORT FORWARD_ELASTICSEARCH_PORT; do
+        port_val=$(get_port_assignment "$port_var")
+        content="${content//\{\{$port_var\}\}/$port_val}"
+    done
+
+    printf '%s' "$content"
+}
+
+# Internal: replace a single marker line in a multi-line template with replacement
+# content. When replacement is empty the marker line disappears entirely.
+_replace_marker_line() {
+    local template="$1"
+    local marker="$2"
+    local replacement="$3"
+    local output=""
+    local line
+
+    while IFS= read -r line; do
+        if [ "$line" = "$marker" ]; then
+            output+="$replacement"
+        else
+            output+="$line"$'\n'
+        fi
+    done <<< "$template"
+
+    printf '%s' "$output"
+}
+
+# Fetch a template, substitute {{VAR}} placeholders, write to dest atomically.
+fetch_template() {
+    local rel="$1"
+    local dest="$2"
+    local content
+
+    content=$(_fetch_raw_template "$rel")
+    content=$(_substitute_template_vars "$content")
+
+    # Note the `\n` — command substitution strips trailing newlines, so we
+    # restore one to keep files POSIX-friendly (`text file should end with newline`).
+    local tmp="${dest}.shipyard.tmp"
+    printf '%s\n' "$content" > "$tmp"
+    if ! mv "$tmp" "$dest"; then
+        rm -f "$tmp"
+        exit_with_error $EXIT_TEMPLATE_FETCH_FAILED "Failed to write template to: $dest"
+    fi
+}
+
+# Assemble service + volume blocks from the optional service fragments the
+# user opted into. Results are written to ASSEMBLED_SERVICES_BLOCK and
+# ASSEMBLED_VOLUMES_BLOCK so callers can slot them into compose templates.
+ASSEMBLED_SERVICES_BLOCK=""
+ASSEMBLED_VOLUMES_BLOCK=""
+
+assemble_optional_services() {
+    ASSEMBLED_SERVICES_BLOCK=""
+    ASSEMBLED_VOLUMES_BLOCK=""
+
+    local service fragment svc vol
+    for service in $OPTIONAL_SERVICES; do
+        fragment=$(_fetch_raw_template "services/${service}.yml")
+        # Split on the marker line: text before MARKER goes into services,
+        # text after MARKER goes into volumes. Strip the newline that follows
+        # the marker so each block starts at column 0, then ensure each block
+        # ends with exactly one newline so multiple opted-in services stack
+        # without their lines colliding.
+        svc="${fragment%%# === SHIPYARD:VOLUME ===*}"
+        vol="${fragment##*# === SHIPYARD:VOLUME ===}"
+        vol="${vol#$'\n'}"
+        case "$svc" in *$'\n') ;; *) svc+=$'\n' ;; esac
+        case "$vol" in *$'\n') ;; *) vol+=$'\n' ;; esac
+        ASSEMBLED_SERVICES_BLOCK+="$svc"
+        ASSEMBLED_VOLUMES_BLOCK+="$vol"
+    done
+}
+
+# Compute the port variable list for legacy presets (no compose file exists yet,
+# so we can't use extract_port_vars). Output matches extract_port_vars format:
+# one VAR:DEFAULT_PORT per line.
+compute_legacy_port_vars() {
+    echo "APP_PORT:80"
+    echo "FORWARD_DB_PORT:3306"
+    echo "FORWARD_REDIS_PORT:6379"
+    echo "FORWARD_MAILPIT_PORT:8025"
+
+    local service
+    for service in $OPTIONAL_SERVICES; do
+        case "$service" in
+            meilisearch)   echo "FORWARD_MEILISEARCH_PORT:7700" ;;
+            elasticsearch) echo "FORWARD_ELASTICSEARCH_PORT:9200" ;;
+        esac
+    done
+}
+
+# Scaffold the full docker stack for a legacy preset. Must be called after
+# port assignment so {{*_PORT}} placeholders can resolve.
+scaffold_stack() {
+    local preset="$1"
+
+    echo ""
+    log_info "Scaffolding $preset stack..."
+
+    assemble_optional_services
+
+    local compose
+    compose=$(_fetch_raw_template "${preset}/docker-compose.yml")
+    compose=$(_replace_marker_line "$compose" '    # {{OPTIONAL_SERVICES}}' "$ASSEMBLED_SERVICES_BLOCK")
+    compose=$(_replace_marker_line "$compose" '    # {{OPTIONAL_VOLUMES}}' "$ASSEMBLED_VOLUMES_BLOCK")
+    compose=$(_substitute_template_vars "$compose")
+
+    local tmp="${COMPOSE_FILE}.shipyard.tmp"
+    printf '%s\n' "$compose" > "$tmp"
+    if ! mv "$tmp" "$COMPOSE_FILE"; then
+        rm -f "$tmp"
+        exit_with_error $EXIT_TEMPLATE_FETCH_FAILED "Failed to write $COMPOSE_FILE"
+    fi
+    log_success "Wrote $COMPOSE_FILE"
+
+    fetch_template "${preset}/Dockerfile" "Dockerfile"
+    log_success "Wrote Dockerfile"
+
+    fetch_template "${preset}/nginx.conf" "nginx.conf"
+    log_success "Wrote nginx.conf"
+
+    fetch_template "${preset}/php.ini" "php.ini"
+    log_success "Wrote php.ini"
+}
+
+# ==============================================================================
 # PRESET WIZARD FUNCTIONS
 # ==============================================================================
 
@@ -2178,16 +2344,26 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         log_success "Registry is empty (first project)"
     fi
 
-    # Step 14: Extract port variables from docker-compose.yml
+    # Step 14: Build port variable list. Sail reads them from the existing
+    # docker-compose.yml; legacy presets don't have a compose file yet, so the
+    # list is computed from the chosen preset + opted-in optional services.
     local port_vars_output
     local port_vars_array=()
-    port_vars_output=$(extract_port_vars)
+    if [ "$PRESET" = "sail" ]; then
+        port_vars_output=$(extract_port_vars)
+    else
+        port_vars_output=$(compute_legacy_port_vars)
+    fi
     while IFS= read -r port_var; do
         [ -z "$port_var" ] && continue
         port_vars_array+=("$port_var")
     done <<< "$port_vars_output"
     local num_port_vars=${#port_vars_array[@]}
-    log_success "Extracted $num_port_vars port variable(s) from docker-compose.yml"
+    if [ "$PRESET" = "sail" ]; then
+        log_success "Extracted $num_port_vars port variable(s) from docker-compose.yml"
+    else
+        log_success "Computed $num_port_vars port variable(s) for preset '$PRESET'"
+    fi
 
     echo ""
     log_info "Assigning ports:"
@@ -2215,6 +2391,13 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     done
 
     echo ""
+
+    # Step 15.5: For legacy presets, scaffold the docker stack now that ports
+    # are assigned. Sail keeps its existing compose file untouched.
+    if [ "$PRESET" = "laravel-legacy" ]; then
+        scaffold_stack laravel-legacy
+        echo ""
+    fi
 
     # Step 16: Domain registration (non-interactive)
     if [ "$REGISTER_DOMAIN" = true ]; then
