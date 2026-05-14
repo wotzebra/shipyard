@@ -73,6 +73,14 @@ declare -a PORT_ASSIGNMENT_VALUES=()
 # Project state
 PROJECT_NAME=""
 
+# Preset state (drives compose scaffolding for legacy presets)
+PRESET=""
+SELECTED_PHP_VERSION=""
+SELECTED_MYSQL_VERSION=""
+OPTIONAL_SERVICES=""
+MEILISEARCH_VERSION=""
+ELASTICSEARCH_VERSION=""
+
 # Domain registration state
 DOMAIN_REGISTERED=false
 REGISTERED_DOMAIN=""
@@ -1914,6 +1922,168 @@ collect_user_input() {
 }
 
 # ==============================================================================
+# PRESET WIZARD FUNCTIONS
+# ==============================================================================
+
+prompt_preset() {
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🧰 Project Preset${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${DIM}What kind of project is this?${NC}"
+    echo -e "  ${CYAN}[1]${NC} Laravel Sail ${DIM}(existing docker-compose.yml)${NC}"
+    echo -e "  ${CYAN}[2]${NC} Laravel Legacy ${DIM}(pre-Sail Laravel 6/7/8 on PHP 7.x)${NC}"
+    echo -e "  ${CYAN}[3]${NC} CakePHP 2 ${DIM}(PHP 5.6/7.x with per-env config folders)${NC}"
+    echo ""
+
+    while true; do
+        echo -n "Select preset [1]: "
+        read -r selection
+        selection=${selection:-1}
+
+        case $selection in
+            1) PRESET="sail"; log_success "Selected: Laravel Sail"; break ;;
+            2) PRESET="laravel-legacy"; log_success "Selected: Laravel Legacy"; break ;;
+            3) PRESET="cakephp-2"; log_success "Selected: CakePHP 2"; break ;;
+            *) echo -e "${YELLOW}Invalid selection. Choose 1, 2, or 3.${NC}" ;;
+        esac
+    done
+}
+
+prompt_php_version() {
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🐘 PHP Version${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+
+    local versions default_version
+    if [ "$PRESET" = "laravel-legacy" ]; then
+        versions=("7.2" "7.3" "7.4")
+        default_version="7.4"
+    else
+        versions=("5.6" "7.0" "7.1" "7.2" "7.3" "7.4")
+        default_version="7.4"
+    fi
+
+    echo -e "${DIM}Choose the PHP version for the docker stack:${NC}"
+    local i=1
+    local default_index=1
+    for v in "${versions[@]}"; do
+        if [ "$v" = "$default_version" ]; then
+            echo -e "  ${CYAN}[$i]${NC} PHP $v ${DIM}(default)${NC}"
+            default_index=$i
+        else
+            echo -e "  ${CYAN}[$i]${NC} PHP $v"
+        fi
+        i=$((i + 1))
+    done
+    echo ""
+
+    while true; do
+        echo -n "Select PHP version [$default_index]: "
+        read -r selection
+        selection=${selection:-$default_index}
+
+        if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "${#versions[@]}" ]; then
+            SELECTED_PHP_VERSION="${versions[$((selection - 1))]}"
+            log_success "Selected: PHP $SELECTED_PHP_VERSION"
+            break
+        else
+            echo -e "${YELLOW}Invalid selection. Choose a number between 1 and ${#versions[@]}.${NC}"
+        fi
+    done
+}
+
+prompt_mysql_version() {
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🐬 MySQL Version${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+
+    # PHP ≤ 7.2 → default 5.7; newer → 8.0
+    local default_version="8.0"
+    case "$SELECTED_PHP_VERSION" in
+        5.6|7.0|7.1|7.2) default_version="5.7" ;;
+    esac
+
+    local versions=("5.6" "5.7" "8.0")
+
+    echo -e "${DIM}Choose the MySQL version for the docker stack:${NC}"
+    local i=1
+    local default_index=1
+    for v in "${versions[@]}"; do
+        if [ "$v" = "$default_version" ]; then
+            echo -e "  ${CYAN}[$i]${NC} MySQL $v ${DIM}(default for PHP $SELECTED_PHP_VERSION)${NC}"
+            default_index=$i
+        else
+            echo -e "  ${CYAN}[$i]${NC} MySQL $v"
+        fi
+        i=$((i + 1))
+    done
+    echo ""
+
+    while true; do
+        echo -n "Select MySQL version [$default_index]: "
+        read -r selection
+        selection=${selection:-$default_index}
+
+        if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "${#versions[@]}" ]; then
+            SELECTED_MYSQL_VERSION="${versions[$((selection - 1))]}"
+            log_success "Selected: MySQL $SELECTED_MYSQL_VERSION"
+            break
+        else
+            echo -e "${YELLOW}Invalid selection. Choose a number between 1 and ${#versions[@]}.${NC}"
+        fi
+    done
+}
+
+prompt_optional_services() {
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🧩 Optional Services${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${DIM}Base stack always includes php, nginx, mysql, redis, mailpit.${NC}"
+    echo -e "${DIM}Add a search engine only if your project actually uses one.${NC}"
+    echo ""
+
+    local response
+
+    echo -n "Include Meilisearch? [y/N]: "
+    read -r response
+    response=${response:-N}
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+        OPTIONAL_SERVICES="${OPTIONAL_SERVICES} meilisearch"
+        echo -n "  Meilisearch image tag [latest]: "
+        read -r tag
+        MEILISEARCH_VERSION="${tag:-latest}"
+        log_success "Meilisearch enabled (getmeili/meilisearch:$MEILISEARCH_VERSION)"
+    fi
+
+    echo -n "Include Elasticsearch? [y/N]: "
+    read -r response
+    response=${response:-N}
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+        OPTIONAL_SERVICES="${OPTIONAL_SERVICES} elasticsearch"
+        echo -n "  Elasticsearch image tag [7.17.28]: "
+        read -r tag
+        ELASTICSEARCH_VERSION="${tag:-7.17.28}"
+        log_success "Elasticsearch enabled (docker.elastic.co/elasticsearch/elasticsearch:$ELASTICSEARCH_VERSION)"
+    fi
+
+    # Trim leading whitespace
+    OPTIONAL_SERVICES="${OPTIONAL_SERVICES# }"
+
+    if [ -z "$OPTIONAL_SERVICES" ]; then
+        echo ""
+        log_info "No optional services selected — base stack only"
+    fi
+}
+
+# ==============================================================================
 # MAIN EXECUTION
 # ==============================================================================
 
@@ -1948,20 +2118,37 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     fi
     log_success "Project not yet registered"
 
-    # Step 4: Check if .env file already exists (fail fast!)
-    check_env_already_initialized
-    log_success ".env file does not exist yet"
+    # Step 4: Choose preset (first user input — drives branching below)
+    prompt_preset
 
-    # Step 5: Validate Docker is installed and running
+    # Step 5: For legacy presets, collect stack details now so they're available
+    # before scaffolding and port assignment
+    if [ "$PRESET" != "sail" ]; then
+        prompt_php_version
+        prompt_mysql_version
+        prompt_optional_services
+    fi
+
+    # Step 6: Check if .env file already exists (sail/laravel-legacy only;
+    # cakephp-2 uses per-env config folders and is handled separately in Step 4)
+    if [ "$PRESET" = "sail" ] || [ "$PRESET" = "laravel-legacy" ]; then
+        check_env_already_initialized
+        log_success ".env file does not exist yet"
+    fi
+
+    # Step 7: Validate Docker is installed and running
     validate_docker
 
-    # Step 6: Check for Docker network issues
+    # Step 8: Check for Docker network issues
     check_docker_networks
 
-    # Step 7: Validate docker-compose.yml exists
-    validate_docker_compose
+    # Step 9: Validate docker-compose.yml exists (sail only — legacy presets
+    # scaffold the compose file in Step 3)
+    if [ "$PRESET" = "sail" ]; then
+        validate_docker_compose
+    fi
 
-    # Step 8: Collect all user input upfront
+    # Step 10: Collect all user input upfront
     collect_user_input
 
     # Step 9: Write auth.json (when needed) and run composer install
