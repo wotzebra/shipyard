@@ -580,17 +580,55 @@ Please create a .env file or .env.example before running this script."
     fi
 }
 
+# Returns the directory containing composer.json (relative to cwd), or empty
+# if not found. Cake 2 projects sometimes keep it under app/ instead of the
+# repo root, so we check both for that preset.
+find_composer_json_dir() {
+    if [ -f "composer.json" ]; then
+        echo "."
+    elif [ "$PRESET" = "cakephp-2" ] && [ -f "app/composer.json" ]; then
+        echo "app"
+    fi
+}
+
+# Detect the major composer version a project was generated against by sniffing
+# composer.lock. composer 2 lockfiles include "plugin-api-version"; composer 1
+# lockfiles include a top-level "hash". Falls back to a PHP-version heuristic
+# when no lockfile is present (fresh projects).
+detect_composer_version() {
+    local composer_dir="$1"
+    local lock="$composer_dir/composer.lock"
+
+    if [ -f "$lock" ]; then
+        if grep -q '"plugin-api-version"' "$lock"; then
+            echo "2"
+            return
+        fi
+        if grep -q '"hash":' "$lock"; then
+            echo "1"
+            return
+        fi
+    fi
+
+    # No lockfile — fall back on PHP version. composer 2 dropped < 7.2.5.
+    case "$SELECTED_PHP_VERSION" in
+        5.6|7.0|7.1) echo "1" ;;
+        *)           echo "2" ;;
+    esac
+}
+
 extract_composer_repositories() {
-    # Extract repository URLs from composer.json
-    if [ ! -f "composer.json" ]; then
-        echo ""
-        log_error "composer.json not found in current directory"
-        exit 1
+    # Extract repository URLs from composer.json.
+    # Returns empty when composer.json is absent (some old Cake 2 projects predate composer).
+    local dir
+    dir=$(find_composer_json_dir)
+    if [ -z "$dir" ]; then
+        return 0
     fi
 
     # Use grep and sed to extract repository URLs (simple parsing, works for most cases)
     # This extracts URLs from the "repositories" array and removes https:// prefix
-    grep -A 2 '"type".*"composer"' composer.json | grep '"url"' | sed -E 's/.*"url"[[:space:]]*:[[:space:]]*"https?:\/\/([^"]+)".*/\1/'
+    grep -A 2 '"type".*"composer"' "$dir/composer.json" | grep '"url"' | sed -E 's/.*"url"[[:space:]]*:[[:space:]]*"https?:\/\/([^"]+)".*/\1/'
 }
 
 detect_php_version() {
@@ -636,7 +674,17 @@ write_composer_auth_json() {
         return 0
     fi
 
-    log_info "Writing auth.json with private repository credentials..."
+    # Write auth.json next to composer.json so composer picks it up automatically.
+    local composer_dir
+    composer_dir=$(find_composer_json_dir)
+    local auth_path
+    if [ "$composer_dir" = "." ]; then
+        auth_path="auth.json"
+    else
+        auth_path="$composer_dir/auth.json"
+    fi
+
+    log_info "Writing $auth_path with private repository credentials..."
 
     # Build the http-basic JSON block
     local http_basic_entries=""
@@ -654,7 +702,7 @@ write_composer_auth_json() {
         repo_index=$((repo_index + 1))
     done
 
-    cat > auth.json <<EOF
+    cat > "$auth_path" <<EOF
 {
     "http-basic": {
 $http_basic_entries
@@ -662,51 +710,80 @@ $http_basic_entries
 }
 EOF
 
-    log_success "auth.json written"
+    log_success "$auth_path written"
 
-    # Ensure auth.json is in .gitignore
+    # Ensure auth.json is in .gitignore (path-aware so we cover app/auth.json too)
     if [ -f ".gitignore" ]; then
-        if ! grep -qxF "auth.json" .gitignore; then
-            echo "auth.json" >> .gitignore
+        if ! grep -qxF "$auth_path" .gitignore; then
+            echo "$auth_path" >> .gitignore
             log_success "auth.json added to .gitignore"
         fi
     else
-        echo "auth.json" > .gitignore
-        log_success ".gitignore created with auth.json"
+        echo "$auth_path" > .gitignore
+        log_success ".gitignore created with $auth_path"
     fi
 
     echo ""
 }
 
 run_composer_install() {
+    # cake-2 projects may predate composer entirely — skip if no composer.json
+    # at either the repo root or under app/.
+    local composer_dir
+    composer_dir=$(find_composer_json_dir)
+    if [ "$PRESET" = "cakephp-2" ] && [ -z "$composer_dir" ]; then
+        log_info "No composer.json — skipping composer install (cakephp-2 preset)"
+        echo ""
+        return 0
+    fi
+
     echo ""
     log_info "=========================================="
     log_info "Installing Composer dependencies..."
     log_info "=========================================="
     echo ""
 
-    # Detect PHP version from docker-compose.yml
-    local php_version=$(detect_php_version)
-    local composer_php_version="$php_version"
-
-    # Use PHP 8.4 composer image when project runtime is 8.5 (see https://github.com/laravel/sail-server/pull/35)
-    if [ "$php_version" = "85" ]; then
-        composer_php_version="84"
-    fi
-
-    local composer_image="laravelsail/php${composer_php_version}-composer:latest"
-
-    if [ "$php_version" = "$composer_php_version" ]; then
-        log_info "Using PHP ${php_version:0:1}.${php_version:1} composer image: $composer_image"
+    local composer_image
+    if [ "$PRESET" = "sail" ]; then
+        # Sail: keep the matching laravelsail/phpXY-composer image so the
+        # extension set matches the runtime container.
+        local php_version=$(detect_php_version)
+        local composer_php_version="$php_version"
+        # Use PHP 8.4 composer image when project runtime is 8.5 (see https://github.com/laravel/sail-server/pull/35)
+        if [ "$php_version" = "85" ]; then
+            composer_php_version="84"
+        fi
+        composer_image="laravelsail/php${composer_php_version}-composer:latest"
+        if [ "$php_version" = "$composer_php_version" ]; then
+            log_info "Using PHP ${php_version:0:1}.${php_version:1} composer image: $composer_image"
+        else
+            log_info "Detected PHP ${php_version:0:1}.${php_version:1}; using PHP ${composer_php_version:0:1}.${composer_php_version:1} composer image: $composer_image"
+        fi
     else
-        log_info "Detected PHP ${php_version:0:1}.${php_version:1}; using PHP ${composer_php_version:0:1}.${composer_php_version:1} composer image: $composer_image"
+        # Legacy presets: official composer image. Detect from composer.lock if
+        # present (most reliable), otherwise fall back to PHP version.
+        local composer_major
+        composer_major=$(detect_composer_version "$composer_dir")
+        composer_image="composer:$composer_major"
+        if [ -f "$composer_dir/composer.lock" ]; then
+            log_info "Using $composer_image (detected from $composer_dir/composer.lock)"
+        else
+            log_info "Using $composer_image (no composer.lock — defaulted by PHP $SELECTED_PHP_VERSION)"
+        fi
     fi
     echo ""
 
-    log_info "Running composer install via Docker..."
+    # For sail there's no detected composer_dir (we don't probe); root is correct.
+    local workdir="/var/www/html"
+    if [ -n "$composer_dir" ] && [ "$composer_dir" != "." ]; then
+        workdir="/var/www/html/$composer_dir"
+        log_info "Running composer install in container path $workdir (composer.json under $composer_dir/)..."
+    else
+        log_info "Running composer install via Docker..."
+    fi
     echo ""
 
-    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w /var/www/html "$composer_image" composer install --ignore-platform-reqs
+    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w "$workdir" "$composer_image" composer install --ignore-platform-reqs
 
     if [ $? -ne 0 ]; then
         echo ""
@@ -1689,12 +1766,18 @@ collect_user_input() {
     echo ""
 
     # 1. Collect Composer credentials for private repositories
-    if [ ! -f "composer.json" ]; then
+    local repositories=()
+    local composer_dir
+    composer_dir=$(find_composer_json_dir)
+    if [ -n "$composer_dir" ]; then
+        repositories=($(extract_composer_repositories))
+    elif [ "$PRESET" = "cakephp-2" ]; then
+        # Old Cake 2 projects may predate composer entirely — skip silently.
+        log_info "No composer.json found — skipping composer credential collection"
+    else
         log_error "composer.json not found in current directory"
         exit 1
     fi
-
-    local repositories=($(extract_composer_repositories))
 
     if [ ${#repositories[@]} -gt 0 ]; then
         echo ""
