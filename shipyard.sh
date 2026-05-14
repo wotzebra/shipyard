@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# Shipyard - Laravel Sail Project Setup Script
+# Shipyard - PHP project setup script
 # ==============================================================================
-# Sets up Laravel Sail projects with automatic port assignment, SSL certificates,
-# and local domain configuration. Manages a shared registry to prevent port
-# conflicts across multiple projects.
+# Sets up Dockerized PHP projects with automatic port assignment, SSL
+# certificates, and local domain configuration. Supports Laravel Sail,
+# pre-Sail Laravel (6/7/8), and CakePHP 2 via interchangeable presets.
+# Manages a shared registry to prevent port conflicts across projects.
 #
 # Usage: shipyard [options]
 # ==============================================================================
@@ -174,14 +175,15 @@ show_help() {
 
     cat << EOF
 Usage:
-  shipyard init         Initialize a Laravel Sail project
+  shipyard init         Initialize a PHP project (Sail, Laravel Legacy, or CakePHP 2)
   shipyard list         List all registered projects
   shipyard cleanup      Clean up Docker resources and stale projects
   shipyard [options]
 
 Commands:
-  init                  Set up the Laravel Sail project in current directory
-                        (automatic port assignment, domain configuration, etc.)
+  init                  Set up the project in current directory; the wizard
+                        prompts for a preset (Sail / Laravel Legacy / CakePHP 2)
+                        and handles port assignment, scaffolding, and domain config
   list                  Show all registered projects from config file
   cleanup               Clean up stale projects from registry
 
@@ -218,7 +220,7 @@ show_title() {
             /_/    /____/
 EOF
     echo -e "${NC}"
-    echo -e "⚓ ${DIM}v${VERSION} - Laravel Sail Project Setup${NC}"
+    echo -e "⚓ ${DIM}v${VERSION} - PHP Project Setup${NC}"
     echo ""
 }
 
@@ -1475,37 +1477,41 @@ append_ports_to_env() {
         # Always add COMPOSE_PROJECT_NAME (normalized from path)
         echo "COMPOSE_PROJECT_NAME=$PROJECT_NAME"
 
-        # Add APP_URL and ASSET_URL only for Laravel projects
-        if [ -n "$app_port" ]; then
-            if [ "$DOMAIN_REGISTERED" = true ]; then
-                # Use domain with protocol based on secure setting
-                if [ "$USE_SECURE_PROXY" = true ]; then
-                    echo "APP_URL=https://${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+        # Laravel-specific app/asset/vite/mix vars — skipped for cakephp-2
+        # since Cake 2 doesn't read .env and these would just be misleading.
+        if [ "$PRESET" != "cakephp-2" ]; then
+            # Add APP_URL and ASSET_URL only for Laravel projects
+            if [ -n "$app_port" ]; then
+                if [ "$DOMAIN_REGISTERED" = true ]; then
+                    # Use domain with protocol based on secure setting
+                    if [ "$USE_SECURE_PROXY" = true ]; then
+                        echo "APP_URL=https://${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+                    else
+                        echo "APP_URL=http://${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+                    fi
                 else
-                    echo "APP_URL=http://${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+                    # Fall back to localhost
+                    echo "APP_URL=http://localhost:${app_port}"
                 fi
-            else
-                # Fall back to localhost
-                echo "APP_URL=http://localhost:${app_port}"
+                echo "ASSET_URL=\"\${APP_URL}\""
             fi
-            echo "ASSET_URL=\"\${APP_URL}\""
-        fi
 
-        # Add VITE_SERVER_HOST only when Vite is installed
-        if [ -n "$app_port" ] && is_vite_installed; then
-            if [ "$DOMAIN_REGISTERED" = true ]; then
-                echo "VITE_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
-            else
-                echo "VITE_SERVER_HOST=localhost"
+            # Add VITE_SERVER_HOST only when Vite is installed
+            if [ -n "$app_port" ] && is_vite_installed; then
+                if [ "$DOMAIN_REGISTERED" = true ]; then
+                    echo "VITE_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+                else
+                    echo "VITE_SERVER_HOST=localhost"
+                fi
             fi
-        fi
 
-        # Add MIX_SERVER_HOST only when Laravel Mix is installed
-        if [ -n "$app_port" ] && is_laravel_mix_installed; then
-            if [ "$DOMAIN_REGISTERED" = true ]; then
-                echo "MIX_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
-            else
-                echo "MIX_SERVER_HOST=localhost"
+            # Add MIX_SERVER_HOST only when Laravel Mix is installed
+            if [ -n "$app_port" ] && is_laravel_mix_installed; then
+                if [ "$DOMAIN_REGISTERED" = true ]; then
+                    echo "MIX_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+                else
+                    echo "MIX_SERVER_HOST=localhost"
+                fi
             fi
         fi
 
@@ -1962,13 +1968,25 @@ collect_user_input() {
     echo -e "${BOLD}⚡ Post-Setup Automation${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo -e "${DIM}After port assignment, these commands can be run:${NC}"
-    echo -e "  ${DIM}1.${NC} Start Docker containers ${DIM}(vendor/bin/sail up -d)${NC}"
-    echo -e "  ${DIM}2.${NC} Run Composer setup ${DIM}(vendor/bin/sail composer setup)${NC}"
-    echo ""
-    echo -n "Run these commands automatically? [Y/n]: "
-    read -r RUN_POST_SETUP
-    RUN_POST_SETUP=${RUN_POST_SETUP:-Y}
+    if [ "$PRESET" = "sail" ]; then
+        echo -e "${DIM}After port assignment, these commands can be run:${NC}"
+        echo -e "  ${DIM}1.${NC} Start Docker containers ${DIM}(vendor/bin/sail up -d)${NC}"
+        echo -e "  ${DIM}2.${NC} Run Composer setup ${DIM}(vendor/bin/sail composer setup)${NC}"
+        echo ""
+        echo -n "Run these commands automatically? [Y/n]: "
+        read -r RUN_POST_SETUP
+        RUN_POST_SETUP=${RUN_POST_SETUP:-Y}
+    else
+        # Legacy presets: no Sail, and composer install already ran during init.
+        # Only `docker compose up -d` is left, and the first build can take a few
+        # minutes — default the prompt to N to let the user review files first.
+        echo -e "${DIM}After scaffolding, Docker containers can be started with:${NC}"
+        echo -e "  ${DIM}•${NC} ${DIM}docker compose up -d${NC} ${DIM}(builds the Dockerfile on first run — may take a few minutes)${NC}"
+        echo ""
+        echo -n "Start containers automatically? [y/N]: "
+        read -r RUN_POST_SETUP
+        RUN_POST_SETUP=${RUN_POST_SETUP:-N}
+    fi
 
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -2006,7 +2024,11 @@ collect_user_input() {
         fi
     fi
     if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
-        echo -e "  ${DIM}5.${NC} Start Docker containers and run Composer setup"
+        if [ "$PRESET" = "sail" ]; then
+            echo -e "  ${DIM}5.${NC} Start Docker containers and run Composer setup"
+        else
+            echo -e "  ${DIM}5.${NC} Start Docker containers (docker compose up -d)"
+        fi
     fi
     echo ""
     read -r -p "Continue with setup? [Y/n] " confirm
@@ -2140,7 +2162,10 @@ assemble_optional_services() {
 compute_legacy_port_vars() {
     echo "APP_PORT:80"
     echo "FORWARD_DB_PORT:3306"
-    echo "FORWARD_REDIS_PORT:6379"
+    # cakephp-2 has no redis service in its base stack
+    if [ "$PRESET" != "cakephp-2" ]; then
+        echo "FORWARD_REDIS_PORT:6379"
+    fi
     echo "FORWARD_MAILPIT_PORT:8025"
 
     local service
@@ -2173,6 +2198,16 @@ scaffold_stack() {
     compose=$(_fetch_raw_template "${preset}/docker-compose.yml")
     compose=$(_replace_marker_line "$compose" '    # {{OPTIONAL_SERVICES}}' "$ASSEMBLED_SERVICES_BLOCK")
     compose=$(_replace_marker_line "$compose" '    # {{OPTIONAL_VOLUMES}}' "$ASSEMBLED_VOLUMES_BLOCK")
+
+    # mysql:5.6 / 5.7 images are amd64-only — inject `platform: linux/amd64`
+    # so Apple Silicon hosts can pull them under emulation. mysql:8.0 is
+    # multi-arch and doesn't need it.
+    local mysql_platform=""
+    case "$SELECTED_MYSQL_VERSION" in
+        5.6|5.7) mysql_platform="        platform: 'linux/amd64'"$'\n' ;;
+    esac
+    compose=$(_replace_marker_line "$compose" '        # {{MYSQL_PLATFORM}}' "$mysql_platform")
+
     compose=$(_substitute_template_vars "$compose")
 
     local tmp="${COMPOSE_FILE}.shipyard.tmp"
@@ -2865,29 +2900,44 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         echo "=========================================="
         echo ""
 
-        log_info "Step 1/2: Starting Docker containers (vendor/bin/sail up -d)..."
-        ./vendor/bin/sail up -d
+        if [ "$PRESET" = "sail" ]; then
+            log_info "Step 1/2: Starting Docker containers (vendor/bin/sail up -d)..."
+            ./vendor/bin/sail up -d
 
-        if [ $? -ne 0 ]; then
+            if [ $? -ne 0 ]; then
+                echo ""
+                log_error "Failed to start Docker containers."
+                echo "You may need to run this manually:"
+                echo "  ./vendor/bin/sail up -d"
+                exit 9
+            fi
+            log_success "Docker containers started"
+
             echo ""
-            log_error "Failed to start Docker containers."
-            echo "You may need to run this manually:"
-            echo "  ./vendor/bin/sail up -d"
-            exit 9
-        fi
-        log_success "Docker containers started"
+            log_info "Step 2/2: Running Composer setup (vendor/bin/sail composer setup)..."
+            ./vendor/bin/sail composer setup
 
-        echo ""
-        log_info "Step 2/2: Running Composer setup (vendor/bin/sail composer setup)..."
-        ./vendor/bin/sail composer setup
+            if [ $? -ne 0 ]; then
+                echo ""
+                log_error "Composer setup failed. You may need to run this manually:"
+                echo "  ./vendor/bin/sail composer setup"
+                exit 9
+            fi
+            log_success "Composer setup completed"
+        else
+            # Legacy presets: no Sail wrapper, composer install already ran.
+            log_info "Starting Docker containers (docker compose up -d)..."
+            docker compose up -d
 
-        if [ $? -ne 0 ]; then
-            echo ""
-            log_error "Composer setup failed. You may need to run this manually:"
-            echo "  ./vendor/bin/sail composer setup"
-            exit 9
+            if [ $? -ne 0 ]; then
+                echo ""
+                log_error "Failed to start Docker containers."
+                echo "You may need to run this manually:"
+                echo "  docker compose up -d"
+                exit 9
+            fi
+            log_success "Docker containers started"
         fi
-        log_success "Composer setup completed"
 
         echo ""
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -2923,8 +2973,12 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
         echo "To complete setup manually, run:"
-        echo -e "  ${DIM}1.${NC} ./vendor/bin/sail up -d"
-        echo -e "  ${DIM}2.${NC} ./vendor/bin/sail composer setup"
+        if [ "$PRESET" = "sail" ]; then
+            echo -e "  ${DIM}1.${NC} ./vendor/bin/sail up -d"
+            echo -e "  ${DIM}2.${NC} ./vendor/bin/sail composer setup"
+        else
+            echo -e "  ${DIM}•${NC} docker compose up -d"
+        fi
     fi
 
     print_review_summary

@@ -9,7 +9,6 @@ services:
             - './php.ini:/usr/local/etc/php/conf.d/zz-shipyard.ini:ro'
         depends_on:
             - mysql
-            - redis
     nginx:
         image: 'nginx:alpine'
         ports:
@@ -21,6 +20,7 @@ services:
             - php
     mysql:
         image: 'mysql:{{MYSQL_VERSION}}'
+        # {{MYSQL_PLATFORM}}
         ports:
             - '${FORWARD_DB_PORT:-{{FORWARD_DB_PORT}}}:3306'
         environment:
@@ -32,12 +32,6 @@ services:
             MYSQL_ALLOW_EMPTY_PASSWORD: 1
         volumes:
             - 'mysql:/var/lib/mysql'
-    redis:
-        image: 'redis:alpine'
-        ports:
-            - '${FORWARD_REDIS_PORT:-{{FORWARD_REDIS_PORT}}}:6379'
-        volumes:
-            - 'redis:/data'
     mailpit:
         image: 'axllent/mailpit:latest'
         ports:
@@ -46,7 +40,5 @@ services:
     # {{OPTIONAL_SERVICES}}
 volumes:
     mysql:
-        driver: local
-    redis:
         driver: local
     # {{OPTIONAL_VOLUMES}}

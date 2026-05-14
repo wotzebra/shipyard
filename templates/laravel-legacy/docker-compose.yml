@@ -21,6 +21,7 @@ services:
             - php
     mysql:
         image: 'mysql:{{MYSQL_VERSION}}'
+        # {{MYSQL_PLATFORM}}
         ports:
             - '${FORWARD_DB_PORT:-{{FORWARD_DB_PORT}}}:3306'
         environment:
