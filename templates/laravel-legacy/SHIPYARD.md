@@ -114,6 +114,17 @@ The file looks like:
 
 To add a registry later (or rotate a token), append the scope mapping + the matching `//<host>/:_authToken=…` line, then re-run `npm install`.
 
+## SSH agent forwarding (git+ssh deps, private clones)
+
+The `php` image ships `openssh-client`, and the compose file forwards the host SSH agent into the container — so `npm` deps declared as `"foo": "git+ssh://git@github.com:org/repo.git"`, or any `git clone git@github.com:...` you run via `docker compose exec`, work without putting SSH keys into the image.
+
+- macOS Docker Desktop bridges the host SSH agent at `/run/host-services/ssh-auth.sock` automatically; no setup needed.
+- Linux: export `SHIPYARD_SSH_SOCK="$SSH_AUTH_SOCK"` before `docker compose up` so the right socket gets mounted.
+- Your SSH key must be loaded in the host agent (`ssh-add -l` should list it).
+- 1Password's SSH-agent integration on macOS works too — Docker Desktop's bridge follows whatever the agent socket points at.
+
+If the npm registry-token route works for everything you need (no `git+ssh` deps in `package.json`), you can ignore this section.
+
 ## Node / npm (front-end builds)
 
 The `php` image ships with `nvm` and installs whichever Node version is pinned in this project's `.nvmrc`. `node`, `npm`, and `npx` are on `PATH` directly, so:

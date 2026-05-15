@@ -34,10 +34,19 @@ RUN set -eux; \
     esac; \
     apt-get update; \
     apt-get install -y --no-install-recommends --allow-unauthenticated \
-        git unzip curl ca-certificates make g++ "$PY_PKG"; \
+        git unzip curl ca-certificates make g++ openssh-client "$PY_PKG"; \
     command -v python2 >/dev/null || ln -sf "$(command -v python)"  /usr/local/bin/python2; \
     command -v python  >/dev/null || ln -sf "$(command -v python2)" /usr/local/bin/python; \
     rm -rf /var/lib/apt/lists/*
+
+# Preload github.com host keys so `git clone git@github.com:...` (via npm
+# `git+ssh:` deps or `git submodule update`) doesn't prompt for host-key
+# verification. The SSH agent itself is forwarded from the host via
+# docker-compose so the user's keys never enter the image.
+RUN mkdir -p /root/.ssh \
+    && chmod 700 /root/.ssh \
+    && ssh-keyscan -H github.com >> /root/.ssh/known_hosts 2>/dev/null \
+    && chmod 600 /root/.ssh/known_hosts
 
 ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
 RUN chmod +x /usr/local/bin/install-php-extensions \

@@ -4,9 +4,17 @@ services:
         build:
             context: .
             dockerfile: Dockerfile
+        environment:
+            # Forward the host SSH agent so `npm install` / `git submodule
+            # update` can resolve git+ssh deps inside the container.
+            SSH_AUTH_SOCK: /ssh-agent
         volumes:
             - '.:/var/www/html'
             - './php.ini:/usr/local/etc/php/conf.d/zz-shipyard.ini:ro'
+            # macOS Docker Desktop bridges the host SSH agent at this path
+            # automatically. Linux: export SHIPYARD_SSH_SOCK=$SSH_AUTH_SOCK
+            # before `docker compose up` to override.
+            - '${SHIPYARD_SSH_SOCK:-/run/host-services/ssh-auth.sock}:/ssh-agent'
         depends_on:
             - mysql
             - redis

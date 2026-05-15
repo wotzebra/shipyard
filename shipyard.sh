@@ -2380,11 +2380,12 @@ scaffold_stack() {
 
     # MySQL 8 defaults to caching_sha2_password, which legacy PHP mysqlnd builds
     # don't speak (SQLSTATE[HY000] [2054]). Force the native plugin on. The
-    # 8.0 flag was removed in 8.4 and replaced by --mysql-native-password=ON.
+    # 8.0 flag was removed in 8.4; 8.4 also disables the plugin by default and
+    # needs --authentication-policy so MYSQL_USER is created with it.
     local mysql_auth=""
     case "$SELECTED_MYSQL_VERSION" in
         8.0) mysql_auth="        command: ['--default-authentication-plugin=mysql_native_password']"$'\n' ;;
-        8.4) mysql_auth="        command: ['--mysql-native-password=ON']"$'\n' ;;
+        8.4) mysql_auth="        command: ['--mysql-native-password=ON', '--authentication-policy=mysql_native_password']"$'\n' ;;
     esac
     compose=$(_replace_marker_line "$compose" '        # {{MYSQL_AUTH_PLUGIN}}' "$mysql_auth")
 

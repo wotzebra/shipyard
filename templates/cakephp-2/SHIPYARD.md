@@ -117,16 +117,21 @@ Swap `composer:2` for `composer:1` on PHP 5.6 / 7.0 / 7.1.
 
 ## Git submodules (pre-composer projects)
 
-Some very old Cake 2 projects predate composer and vendor their plugins as git submodules instead (`.gitmodules` at the repo root, plugins under `app/Plugin/`, and often `cakephp/` as a submodule too). The `php` container ships `git` but not the OpenSSH client, and it has no access to your host SSH keys / agent — so `git submodule update` inside the container fails with `error: cannot run ssh: No such file or directory`.
-
-**Run submodule operations from the host.** The working tree is bind-mounted into the container, so anything you clone on the host appears at the same path inside docker:
+Some very old Cake 2 projects predate composer and vendor their plugins as git submodules (`.gitmodules` at the repo root, plugins under `app/Plugin/`, often `cakephp/` too). The `php` image ships `openssh-client` and the compose file forwards the host SSH agent into the container, so submodule ops over `git@github.com:` work directly:
 
 ```bash
-git submodule update --init --recursive    # first-time setup or after a pull
-git submodule foreach git pull             # update all submodules
+docker compose exec -w /var/www/html php git submodule update --init --recursive
+docker compose exec -w /var/www/html php git submodule foreach git pull
 ```
 
-After that, the Cake console, MySQL, etc. all work normally from inside the container.
+Same applies to npm dependencies declared as `"foo": "git+ssh://git@github.com:..."` — `docker compose exec php npm install` resolves them via the forwarded agent.
+
+### Prerequisites
+
+- macOS Docker Desktop bridges the host SSH agent at `/run/host-services/ssh-auth.sock` automatically; no setup needed.
+- Linux: export `SHIPYARD_SSH_SOCK="$SSH_AUTH_SOCK"` before `docker compose up` so the right socket gets mounted.
+- Your SSH key must be loaded in the host agent (`ssh-add -l` should list it).
+- 1Password's SSH-agent integration on macOS works too — Docker Desktop's bridge follows whatever the agent socket points at.
 
 ## Private npm registries (auth tokens)
 
