@@ -1,27 +1,43 @@
 FROM php:{{PHP_VERSION}}-fpm
 
 # Legacy PHP base images ship Debian releases (jessie/stretch/buster) that
-# have moved to archive.debian.org. Rewrite sources before the first apt-get
-# so the build works on EOL distros too.
+# have moved to archive.debian.org and whose signing keys have expired.
+# Detect the codename (Debian 9 has no VERSION_CODENAME — fall back via
+# VERSION_ID), rewrite sources for EOL releases, and allow unsigned/expired
+# repos. The Python 2 package name varies across releases: stretch calls it
+# `python`; buster+ uses `python2`. node-gyp 3.x looks for both `python` and
+# `python2` on PATH, so symlink whichever is missing.
 RUN set -eux; \
-    CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"; \
+    . /etc/os-release; \
+    CODENAME="${VERSION_CODENAME:-}"; \
+    if [ -z "$CODENAME" ]; then \
+        case "${VERSION_ID:-}" in \
+            8)  CODENAME=jessie ;; \
+            9)  CODENAME=stretch ;; \
+            10) CODENAME=buster ;; \
+        esac; \
+    fi; \
     case "$CODENAME" in \
         jessie|stretch|buster) \
             echo "deb http://archive.debian.org/debian/ $CODENAME main"            >  /etc/apt/sources.list; \
             echo "deb http://archive.debian.org/debian-security/ $CODENAME/updates main" >> /etc/apt/sources.list; \
-            echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until; \
+            { \
+                echo 'Acquire::Check-Valid-Until "false";'; \
+                echo 'Acquire::AllowInsecureRepositories "true";'; \
+                echo 'Acquire::AllowDowngradeToInsecureRepositories "true";'; \
+            } > /etc/apt/apt.conf.d/99shipyard-archive; \
             ;; \
-    esac
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        git \
-        unzip \
-        curl \
-        ca-certificates \
-        python2 \
-        make \
-        g++ \
-    && rm -rf /var/lib/apt/lists/*
+    esac; \
+    case "$CODENAME" in \
+        jessie|stretch) PY_PKG=python ;; \
+        *)              PY_PKG=python2 ;; \
+    esac; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends --allow-unauthenticated \
+        git unzip curl ca-certificates make g++ "$PY_PKG"; \
+    command -v python2 >/dev/null || ln -sf "$(command -v python)"  /usr/local/bin/python2; \
+    command -v python  >/dev/null || ln -sf "$(command -v python2)" /usr/local/bin/python; \
+    rm -rf /var/lib/apt/lists/*
 
 ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
 RUN chmod +x /usr/local/bin/install-php-extensions \
