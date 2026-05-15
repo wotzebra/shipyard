@@ -122,6 +122,110 @@ git stash pop
 
 eur001 already ships an `app/Config/docker/` and a root `docker-compose.yml`, so an init run here exercises the **overwrite prompts**. Decline once to confirm the abort path, re-run accepting to see the actual rewrite.
 
+## Working with a scaffolded stack
+
+Once a project's been initialised by Shipyard, day-to-day Docker work is the same regardless of preset. The scaffolded `SHIPYARD.md` in the target project is the source of truth for that project's specific ports and credentials — these recipes are the generic patterns.
+
+### Bring up / down
+
+```bash
+docker compose up -d                  # start in background
+docker compose down                   # stop containers
+docker compose down -v                # stop + wipe mysql / search volumes
+docker compose logs -f php nginx      # tail web services
+docker compose build php              # rebuild PHP image after Dockerfile/php.ini edits
+```
+
+### Running commands inside containers
+
+```bash
+# Open a shell
+docker compose exec php bash
+docker compose exec mysql bash
+
+# One-off command (preserves PWD via -w)
+docker compose exec -w /var/www/html php php -v
+```
+
+### Laravel artisan (sail / laravel-legacy)
+
+```bash
+docker compose exec -w /var/www/html php php artisan migrate
+docker compose exec -w /var/www/html php php artisan tinker
+```
+
+### CakePHP 2 console (cakephp-2 preset)
+
+Console expects the working directory to be `app/`:
+
+```bash
+docker compose exec -w /var/www/html/app php ./Console/cake schema create
+docker compose exec -w /var/www/html/app php ./Console/cake Migrations.migrations migrate
+docker compose exec -w /var/www/html/app php ./Console/cake Migrations.migrations migrate -p <PluginName>
+```
+
+### MySQL access
+
+From the CLI:
+
+```bash
+# From the host (find the port in .env or SHIPYARD.md)
+mysql -h 127.0.0.1 -P <FORWARD_DB_PORT> -u sail -ppassword <dbname>
+
+# Load a SQL dump
+docker compose exec -T mysql mysql -usail -ppassword <dbname> < path/to/dump.sql
+
+# Inside the mysql container
+docker compose exec mysql mysql -u root -ppassword
+```
+
+From a GUI client (TablePlus, DBeaver, Sequel Ace, …):
+
+| Field | Value |
+|---|---|
+| Host / Server | `127.0.0.1` |
+| Port | look it up in the project's `.env` (`FORWARD_DB_PORT=…`) or its `SHIPYARD.md` |
+| User | `sail` (root: `root`) |
+| Password | `password` |
+| Database | the project's `COMPOSE_PROJECT_NAME` |
+
+The container hostname `mysql:3306` only works **inside** the docker network; host-side clients always connect via `127.0.0.1:<forwarded-port>`.
+
+### Composer (ad-hoc, not in the php image)
+
+```bash
+# Repo-root composer.json
+docker run --rm -u "$(id -u):$(id -g)" \
+    -v "$(pwd):/var/www/html" -w /var/www/html \
+    composer:2 composer require <package>
+
+# app/composer.json (some Cake 2 layouts)
+docker run --rm -u "$(id -u):$(id -g)" \
+    -v "$(pwd):/var/www/html" -w /var/www/html/app \
+    composer:2 composer require <package>
+```
+
+Use `composer:1` instead of `composer:2` for PHP 5.6 / 7.0 / 7.1.
+
+### Node / npm (front-end builds)
+
+Legacy presets bake `nvm` into the `php` image and install whichever version is pinned in the project's `.nvmrc`. Shipyard creates `.nvmrc` during init if it doesn't already exist (prompting for a version) and reads from it otherwise.
+
+```bash
+docker compose exec -w /var/www/html php npm install
+docker compose exec -w /var/www/html php npm run build
+docker compose exec -w /var/www/html php npx gulp
+```
+
+To change the default Node version: edit `.nvmrc`, then:
+
+```bash
+docker compose build --no-cache php
+docker compose up -d --force-recreate php
+```
+
+`nvm` is sourced in login shells, so for interactive multi-version work: `docker compose exec php bash -l`, then `nvm install <version>` (resets on rebuild).
+
 ## Resetting between runs
 
 If you re-run init in the same fixture:

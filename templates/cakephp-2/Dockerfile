@@ -16,6 +16,11 @@ RUN set -eux; \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         unzip \
+        curl \
+        ca-certificates \
+        python2 \
+        make \
+        g++ \
     && rm -rf /var/lib/apt/lists/*
 
 ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
@@ -29,5 +34,22 @@ RUN chmod +x /usr/local/bin/install-php-extensions \
         opcache \
         zip \
         mcrypt
+
+# nvm + node so `docker compose exec php npm …` works for front-end builds.
+# Version comes from the project's .nvmrc — edit that file + rebuild to bump.
+ENV NVM_DIR=/usr/local/nvm
+COPY .nvmrc /tmp/.nvmrc
+RUN mkdir -p "$NVM_DIR" \
+    && curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash \
+    && . "$NVM_DIR/nvm.sh" \
+    && NODE_VERSION="$(tr -d ' \t\r\n' < /tmp/.nvmrc)" \
+    && nvm install "$NODE_VERSION" \
+    && nvm alias default "$NODE_VERSION" \
+    && NODE_BIN_DIR="$(dirname "$(nvm which "$NODE_VERSION")")" \
+    && ln -sf "$NODE_BIN_DIR/node" /usr/local/bin/node \
+    && ln -sf "$NODE_BIN_DIR/npm"  /usr/local/bin/npm \
+    && ln -sf "$NODE_BIN_DIR/npx"  /usr/local/bin/npx \
+    && echo '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' > /etc/profile.d/nvm.sh \
+    && rm -f /tmp/.nvmrc
 
 WORKDIR /var/www/html

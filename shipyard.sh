@@ -80,6 +80,7 @@ PROJECT_NAME=""
 PRESET=""
 SELECTED_PHP_VERSION=""
 SELECTED_MYSQL_VERSION=""
+SELECTED_NODE_VERSION=""
 OPTIONAL_SERVICES=""
 MEILISEARCH_VERSION=""
 ELASTICSEARCH_VERSION=""
@@ -88,6 +89,7 @@ ELASTICSEARCH_VERSION=""
 CAKE_CONFIG_DIR=""        # "app/Config" or "Config"
 NGINX_DOCROOT=""          # e.g. "public_html", "app/webroot", "webroot"
 CAKE_SOURCE_ENV_FOLDER="" # absolute or relative path to the env folder being cloned
+CAKE_CONSOLE_WORKDIR=""   # `-w` value for `docker compose exec`, e.g. "/var/www/html/app" or "/var/www/html"
 
 # Files that were created or patched during init — printed at end as a review checklist
 declare -a REVIEW_FILES=()
@@ -103,6 +105,9 @@ USE_SECURE_PROXY=true  # Whether to use --secure flag for HTTPS
 # User input collection (collected upfront)
 declare -a COMPOSER_REPO_USERNAMES=()
 declare -a COMPOSER_REPO_PASSWORDS=()
+declare -a NPM_REGISTRY_SCOPES=()
+declare -a NPM_REGISTRY_HOSTS=()
+declare -a NPM_REGISTRY_TOKENS=()
 REGISTER_DOMAIN=false
 USER_DOMAIN_NAME=""
 RUN_POST_SETUP=""
@@ -723,6 +728,114 @@ EOF
     else
         echo "$auth_path" > .gitignore
         log_success ".gitignore created with $auth_path"
+    fi
+
+    echo ""
+}
+
+prompt_npm_credentials() {
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🔑 Private npm registries${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${DIM}If this project depends on private npm packages (FontAwesome Pro,${NC}"
+    echo -e "${DIM}internal company registries, etc.), Shipyard can drop the scope${NC}"
+    echo -e "${DIM}mapping + auth token into .npmrc so npm install works in-container.${NC}"
+    echo ""
+
+    local response
+    echo -n "Configure a private npm registry? [y/N]: "
+    read -r response
+    response=${response:-N}
+
+    while [[ "$response" =~ ^[Yy]$ ]]; do
+        local scope registry_url host token
+        echo ""
+
+        echo -n "  Scope (e.g. @fortawesome): "
+        read -r scope
+        # Make sure it starts with @ so npm treats it as a scope key
+        case "$scope" in
+            @*) ;;
+            "") log_warning "Scope cannot be empty — skipping"; scope="" ;;
+            *)  scope="@$scope" ;;
+        esac
+
+        if [ -n "$scope" ]; then
+            echo -n "  Registry URL (e.g. https://npm.fontawesome.com/): "
+            read -r registry_url
+            if [ -z "$registry_url" ]; then
+                log_warning "Registry URL cannot be empty — skipping"
+            else
+                # Normalise: strip protocol + trailing slash to get the bare host
+                host="${registry_url#https://}"
+                host="${host#http://}"
+                host="${host%/}"
+
+                echo -n "  Token (input hidden): "
+                read -s -r token
+                echo ""
+
+                if [ -z "$token" ]; then
+                    log_warning "Token cannot be empty — skipping this registry"
+                else
+                    NPM_REGISTRY_SCOPES+=("$scope")
+                    NPM_REGISTRY_HOSTS+=("$host")
+                    NPM_REGISTRY_TOKENS+=("$token")
+                    log_success "Stored npm credentials for $scope → $host"
+                fi
+            fi
+        fi
+
+        echo ""
+        echo -n "Add another? [y/N]: "
+        read -r response
+        response=${response:-N}
+    done
+}
+
+# Write the collected scope mappings + auth tokens to a project-local .npmrc
+# (creating or appending). Idempotent: a re-run replaces lines for the same
+# scope/host instead of duplicating them.
+write_npmrc() {
+    if [ ${#NPM_REGISTRY_SCOPES[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    local npmrc=".npmrc"
+    touch "$npmrc"
+
+    local i scope host token url
+    for (( i = 0; i < ${#NPM_REGISTRY_SCOPES[@]}; i++ )); do
+        scope="${NPM_REGISTRY_SCOPES[$i]}"
+        host="${NPM_REGISTRY_HOSTS[$i]}"
+        token="${NPM_REGISTRY_TOKENS[$i]}"
+        url="https://${host}/"
+
+        # Remove any prior entries for this scope or host before re-adding.
+        if [ -s "$npmrc" ]; then
+            local tmp="${npmrc}.shipyard.tmp"
+            grep -v -E "^${scope}:registry=|^//${host}/:_authToken=" "$npmrc" > "$tmp" || true
+            mv "$tmp" "$npmrc"
+        fi
+
+        printf '%s:registry=%s\n'      "$scope" "$url"   >> "$npmrc"
+        printf '//%s/:_authToken=%s\n' "$host"  "$token" >> "$npmrc"
+    done
+
+    log_success "Wrote npm registry credentials to .npmrc"
+    REVIEW_FILES+=(".npmrc")
+
+    # Keep tokens out of git. Same pattern as auth.json above.
+    if [ -f ".gitignore" ]; then
+        if ! grep -qxF ".npmrc" .gitignore; then
+            echo ".npmrc" >> .gitignore
+            log_success ".npmrc added to .gitignore"
+        fi
+    else
+        echo ".npmrc" > .gitignore
+        log_success ".gitignore created with .npmrc"
     fi
 
     echo ""
@@ -1826,6 +1939,11 @@ collect_user_input() {
         done
     fi
 
+    # 1b. Collect private npm registry credentials if there's a package.json
+    if [ -f "package.json" ]; then
+        prompt_npm_credentials
+    fi
+
     # 2. Detect available local dev tools (Valet/Herd)
     detect_local_dev_tools
 
@@ -2078,6 +2196,7 @@ _substitute_template_vars() {
     content="${content//\{\{MEILISEARCH_VERSION\}\}/$MEILISEARCH_VERSION}"
     content="${content//\{\{ELASTICSEARCH_VERSION\}\}/$ELASTICSEARCH_VERSION}"
     content="${content//\{\{NGINX_DOCROOT\}\}/$NGINX_DOCROOT}"
+    content="${content//\{\{CAKE_CONSOLE_WORKDIR\}\}/$CAKE_CONSOLE_WORKDIR}"
 
     local port_var port_val
     for port_var in APP_PORT FORWARD_DB_PORT FORWARD_REDIS_PORT FORWARD_MAILPIT_PORT \
@@ -2156,6 +2275,18 @@ assemble_optional_services() {
     done
 }
 
+# Ensure .nvmrc exists at the project root so the Dockerfile's `COPY .nvmrc`
+# succeeds. If the project already has one we leave it alone; otherwise write
+# the version chosen during the wizard.
+ensure_nvmrc() {
+    if [ -f ".nvmrc" ]; then
+        return
+    fi
+    printf '%s\n' "$SELECTED_NODE_VERSION" > .nvmrc
+    log_success "Wrote .nvmrc ($SELECTED_NODE_VERSION)"
+    REVIEW_FILES+=(".nvmrc")
+}
+
 # Compute the port variable list for legacy presets (no compose file exists yet,
 # so we can't use extract_port_vars). Output matches extract_port_vars format:
 # one VAR:DEFAULT_PORT per line.
@@ -2191,6 +2322,10 @@ scaffold_stack() {
 
     echo ""
     log_info "Scaffolding $preset stack..."
+
+    # The Dockerfile `COPY .nvmrc /tmp/.nvmrc` line needs .nvmrc present in
+    # the build context. Write one if the project doesn't already have it.
+    ensure_nvmrc
 
     assemble_optional_services
 
@@ -2231,11 +2366,81 @@ scaffold_stack() {
     log_success "Wrote php.ini"
     REVIEW_FILES+=("php.ini")
 
+    # .nvmrc was potentially written earlier in scaffold_stack — mark it for
+    # review only if we created it this run (ensure_nvmrc appends to REVIEW_FILES).
+
+    # Per-project docs: SHIPYARD.md cheat sheet + a pointer in the project's
+    # existing README (if any) so future devs find it.
+    fetch_template "${preset}/SHIPYARD.md" "SHIPYARD.md"
+    log_success "Wrote SHIPYARD.md"
+    REVIEW_FILES+=("SHIPYARD.md")
+    update_project_readme
+
     # cake-2 specific: clone an existing env folder, patch the docker bits,
     # and generate the per-machine local.php selector.
     if [ "$preset" = "cakephp-2" ]; then
         scaffold_cakephp_env
     fi
+}
+
+# Append a "Docker development setup" pointer to the project's README.md, or
+# refresh the auto-managed block if it already exists. No-op when there's no
+# README.md — SHIPYARD.md alone is enough in that case.
+update_project_readme() {
+    local readme="README.md"
+    if [ ! -f "$readme" ]; then
+        log_info "No README.md found — skipping README pointer (SHIPYARD.md still written)"
+        return
+    fi
+
+    local marker_begin="<!-- shipyard:docker-setup -->"
+    local marker_end="<!-- /shipyard:docker-setup -->"
+    local section
+    section="$marker_begin
+<!-- This block is auto-managed by Shipyard; edits between these markers
+     will be replaced on the next \`shipyard init\` run. -->
+
+## Docker development setup
+
+This project uses a Dockerized PHP stack scaffolded by [Shipyard](https://github.com/wotzebra/shipyard).
+See [\`SHIPYARD.md\`](SHIPYARD.md) for service details, common commands, and credentials.
+$marker_end"
+
+    if grep -qF "$marker_begin" "$readme"; then
+        # Replace the existing managed block in place. Pure bash so we don't
+        # have to escape newlines through awk -v.
+        local tmp="${readme}.shipyard.tmp"
+        local in_block=0
+        local emitted=0
+        {
+            local line
+            while IFS= read -r line || [ -n "$line" ]; do
+                if [ "$in_block" = 0 ] && [[ "$line" == *"$marker_begin"* ]]; then
+                    in_block=1
+                    if [ "$emitted" = 0 ]; then
+                        printf '%s\n' "$section"
+                        emitted=1
+                    fi
+                    continue
+                fi
+                if [ "$in_block" = 1 ] && [[ "$line" == *"$marker_end"* ]]; then
+                    in_block=0
+                    continue
+                fi
+                if [ "$in_block" = 0 ]; then
+                    printf '%s\n' "$line"
+                fi
+            done < "$readme"
+        } > "$tmp"
+        mv "$tmp" "$readme"
+        log_success "Refreshed Shipyard block in $readme"
+    else
+        # Append a fresh block at the end of the file, with one blank line
+        # separating it from whatever was last in the README.
+        printf '\n%s\n' "$section" >> "$readme"
+        log_success "Added Shipyard pointer to $readme"
+    fi
+    REVIEW_FILES+=("$readme")
 }
 
 # ==============================================================================
@@ -2254,6 +2459,25 @@ Expected either 'app/Config/' or 'Config/' in: $(pwd)
 Are you running 'shipyard init' from the project root?"
     fi
     log_success "Found CakePHP 2 config dir: $CAKE_CONFIG_DIR"
+
+    # Detect where the Cake Console binary lives — wotzebra projects often
+    # keep it at the project root (alongside Config under app/) instead of
+    # the framework default at app/Console/. The substituted SHIPYARD.md
+    # uses this to point users at the right `-w` for docker compose exec.
+    if [ -x "Console/cake" ] || [ -f "Console/cake" ]; then
+        CAKE_CONSOLE_WORKDIR="/var/www/html"
+    elif [ -x "app/Console/cake" ] || [ -f "app/Console/cake" ]; then
+        CAKE_CONSOLE_WORKDIR="/var/www/html/app"
+    else
+        # Fall back to the config dir's parent — Console is typically a sibling
+        # of Config in unconventional layouts.
+        case "$CAKE_CONFIG_DIR" in
+            app/Config) CAKE_CONSOLE_WORKDIR="/var/www/html/app" ;;
+            Config)     CAKE_CONSOLE_WORKDIR="/var/www/html" ;;
+        esac
+        log_warning "Cake Console binary not found at Console/cake or app/Console/cake — assuming workdir $CAKE_CONSOLE_WORKDIR"
+    fi
+    log_success "Cake Console workdir: $CAKE_CONSOLE_WORKDIR"
 }
 
 prompt_cake_docroot() {
@@ -2646,6 +2870,37 @@ prompt_mysql_version() {
     done
 }
 
+prompt_node_version() {
+    # If the project already pins a node version, respect it.
+    if [ -f ".nvmrc" ]; then
+        SELECTED_NODE_VERSION=$(tr -d ' \t\r\n' < .nvmrc)
+        if [ -n "$SELECTED_NODE_VERSION" ]; then
+            log_success "Found .nvmrc — using Node version: $SELECTED_NODE_VERSION"
+            return
+        fi
+        log_warning ".nvmrc exists but is empty — falling through to prompt."
+    fi
+
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🟩 Node Version${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${DIM}No .nvmrc found. Pin the Node version for the docker stack.${NC}"
+    echo -e "${DIM}Accepts anything nvm install accepts: 18, 20, 18.17.0, lts/*, …${NC}"
+    echo ""
+
+    while true; do
+        echo -n "Node version [20]: "
+        read -r input
+        SELECTED_NODE_VERSION=${input:-20}
+        if [ -n "$SELECTED_NODE_VERSION" ]; then
+            log_success "Selected: Node $SELECTED_NODE_VERSION (will be written to .nvmrc)"
+            break
+        fi
+    done
+}
+
 prompt_optional_services() {
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -2733,6 +2988,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         prompt_php_version
         prompt_mysql_version
         prompt_optional_services
+        prompt_node_version
     fi
 
     # Step 6: Check if .env file already exists (sail/laravel-legacy only;
@@ -2759,6 +3015,7 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
 
     # Step 9: Write auth.json (when needed) and run composer install
     write_composer_auth_json
+    write_npmrc
     run_composer_install
 
     # Step 10: Validate/create .env file
