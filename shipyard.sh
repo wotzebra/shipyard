@@ -896,9 +896,21 @@ run_composer_install() {
     else
         log_info "Running composer install via Docker..."
     fi
+
+    # The legacy composer sidecar runs whatever PHP version composer:1 / :2 ships
+    # (PHP 7.x and 8.4 today), which usually mismatches the project's runtime.
+    # Skipping post-install scripts avoids running things like `artisan
+    # package:discover` under the wrong PHP — those need to run inside the
+    # project's own `php` container after `docker compose up`. Sail's per-PHP
+    # composer images match the project runtime, so scripts are safe there.
+    local extra_flags="--ignore-platform-reqs"
+    if [ "$PRESET" != "sail" ]; then
+        extra_flags="$extra_flags --no-scripts"
+        log_info "Using --no-scripts (legacy preset): run post-install scripts inside the project's php container instead."
+    fi
     echo ""
 
-    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w "$workdir" "$composer_image" composer install --ignore-platform-reqs
+    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w "$workdir" "$composer_image" composer install $extra_flags
 
     if [ $? -ne 0 ]; then
         echo ""
@@ -1633,17 +1645,41 @@ append_ports_to_env() {
             echo "$var_name=$(get_port_assignment "$var_name")"
         done
 
+        # Point pre-Sail Laravel projects at the docker service hostnames.
+        # Sail's own .env.example already has these; cakephp-2 doesn't read .env.
+        if [ "$PRESET" = "laravel-legacy" ]; then
+            echo ""
+            echo "# Auto-managed docker service connections (via shipyard.sh)"
+            echo "DB_CONNECTION=mysql"
+            echo "DB_HOST=mysql"
+            echo "DB_PORT=3306"
+            echo "DB_DATABASE=$PROJECT_NAME"
+            echo "DB_USERNAME=sail"
+            echo "DB_PASSWORD=password"
+            echo "REDIS_HOST=redis"
+            echo "REDIS_PASSWORD=null"
+            echo "REDIS_PORT=6379"
+            echo "MAIL_MAILER=smtp"
+            echo "MAIL_HOST=mailpit"
+            echo "MAIL_PORT=1025"
+            echo "MAIL_USERNAME=null"
+            echo "MAIL_PASSWORD=null"
+            echo "MAIL_ENCRYPTION=null"
+        fi
+
         # Add blank line separator
         echo ""
 
-        # Copy existing .env content, but skip COMPOSE_PROJECT_NAME, APP_URL, ASSET_URL, VITE_SERVER_HOST, and MIX_SERVER_HOST
+        # Copy existing .env content, but skip keys we're managing at the top
+        # so the final file ends up with single, authoritative definitions.
         while IFS= read -r line; do
-            # Skip lines we're managing at the top
             if [[ ! "$line" =~ ^COMPOSE_PROJECT_NAME= ]] && \
                [[ ! "$line" =~ ^APP_URL= ]] && \
                [[ ! "$line" =~ ^ASSET_URL= ]] && \
                [[ ! "$line" =~ ^VITE_SERVER_HOST= ]] && \
-               [[ ! "$line" =~ ^MIX_SERVER_HOST= ]]; then
+               [[ ! "$line" =~ ^MIX_SERVER_HOST= ]] && \
+               { [ "$PRESET" != "laravel-legacy" ] || \
+                 [[ ! "$line" =~ ^(DB_CONNECTION|DB_HOST|DB_PORT|DB_DATABASE|DB_USERNAME|DB_PASSWORD|REDIS_HOST|REDIS_PASSWORD|REDIS_PORT|MAIL_MAILER|MAIL_HOST|MAIL_PORT|MAIL_USERNAME|MAIL_PASSWORD|MAIL_ENCRYPTION)= ]]; }; then
                 echo "$line"
             fi
         done < "$ENV_FILE"
@@ -2334,14 +2370,23 @@ scaffold_stack() {
     compose=$(_replace_marker_line "$compose" '    # {{OPTIONAL_SERVICES}}' "$ASSEMBLED_SERVICES_BLOCK")
     compose=$(_replace_marker_line "$compose" '    # {{OPTIONAL_VOLUMES}}' "$ASSEMBLED_VOLUMES_BLOCK")
 
-    # mysql:5.6 / 5.7 images are amd64-only — inject `platform: linux/amd64`
-    # so Apple Silicon hosts can pull them under emulation. mysql:8.0 is
-    # multi-arch and doesn't need it.
+    # mysql:5.7 is amd64-only — inject `platform: linux/amd64` so Apple Silicon
+    # hosts can pull it under emulation. mysql:8.0 and 8.4 are multi-arch.
     local mysql_platform=""
     case "$SELECTED_MYSQL_VERSION" in
-        5.6|5.7) mysql_platform="        platform: 'linux/amd64'"$'\n' ;;
+        5.7) mysql_platform="        platform: 'linux/amd64'"$'\n' ;;
     esac
     compose=$(_replace_marker_line "$compose" '        # {{MYSQL_PLATFORM}}' "$mysql_platform")
+
+    # MySQL 8 defaults to caching_sha2_password, which legacy PHP mysqlnd builds
+    # don't speak (SQLSTATE[HY000] [2054]). Force the native plugin on. The
+    # 8.0 flag was removed in 8.4 and replaced by --mysql-native-password=ON.
+    local mysql_auth=""
+    case "$SELECTED_MYSQL_VERSION" in
+        8.0) mysql_auth="        command: ['--default-authentication-plugin=mysql_native_password']"$'\n' ;;
+        8.4) mysql_auth="        command: ['--mysql-native-password=ON']"$'\n' ;;
+    esac
+    compose=$(_replace_marker_line "$compose" '        # {{MYSQL_AUTH_PLUGIN}}' "$mysql_auth")
 
     compose=$(_substitute_template_vars "$compose")
 
@@ -2839,7 +2884,7 @@ prompt_mysql_version() {
         5.6|7.0|7.1|7.2) default_version="5.7" ;;
     esac
 
-    local versions=("5.6" "5.7" "8.0")
+    local versions=("5.7" "8.0" "8.4")
 
     echo -e "${DIM}Choose the MySQL version for the docker stack:${NC}"
     local i=1

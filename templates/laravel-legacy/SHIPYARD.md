@@ -62,6 +62,18 @@ mysql -h 127.0.0.1 -P {{FORWARD_DB_PORT}} -u sail -ppassword {{PROJECT_NAME}}
 docker compose exec -T mysql mysql -usail -ppassword {{PROJECT_NAME}} < path/to/dump.sql
 ```
 
+## First-time setup after composer install
+
+Shipyard runs `composer install --no-scripts` during init so Laravel's post-install hooks (e.g. `artisan package:discover`) don't execute under the composer sidecar's mismatched PHP version. After `docker compose up -d`, run the scripts inside your project's `php` container — it has the right PHP — once:
+
+```bash
+docker compose exec -w /var/www/html php php artisan package:discover --ansi
+docker compose exec -w /var/www/html php php artisan key:generate     # if APP_KEY is empty
+docker compose exec -w /var/www/html php php artisan storage:link
+```
+
+If your project lists additional post-install scripts in `composer.json`, run those the same way (e.g. `vendor:publish`, package-specific install commands).
+
 ## Connecting from a GUI client (TablePlus, DBeaver, Sequel Ace, …)
 
 Use these values in a new MySQL connection:

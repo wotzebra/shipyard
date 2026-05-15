@@ -115,6 +115,19 @@ docker run --rm -u "$(id -u):$(id -g)" \
 
 Swap `composer:2` for `composer:1` on PHP 5.6 / 7.0 / 7.1.
 
+## Git submodules (pre-composer projects)
+
+Some very old Cake 2 projects predate composer and vendor their plugins as git submodules instead (`.gitmodules` at the repo root, plugins under `app/Plugin/`, and often `cakephp/` as a submodule too). The `php` container ships `git` but not the OpenSSH client, and it has no access to your host SSH keys / agent — so `git submodule update` inside the container fails with `error: cannot run ssh: No such file or directory`.
+
+**Run submodule operations from the host.** The working tree is bind-mounted into the container, so anything you clone on the host appears at the same path inside docker:
+
+```bash
+git submodule update --init --recursive    # first-time setup or after a pull
+git submodule foreach git pull             # update all submodules
+```
+
+After that, the Cake console, MySQL, etc. all work normally from inside the container.
+
 ## Private npm registries (auth tokens)
 
 Shipyard scaffolds private npm registry credentials into `.npmrc` at init time (one scope/token per private registry — e.g. FontAwesome Pro). `.npmrc` is gitignored automatically.
