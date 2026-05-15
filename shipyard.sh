@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# Shipyard - Laravel Sail Project Setup Script
+# Shipyard - PHP project setup script
 # ==============================================================================
-# Sets up Laravel Sail projects with automatic port assignment, SSL certificates,
-# and local domain configuration. Manages a shared registry to prevent port
-# conflicts across multiple projects.
+# Sets up Dockerized PHP projects with automatic port assignment, SSL
+# certificates, and local domain configuration. Supports Laravel Sail,
+# pre-Sail Laravel (6/7/8), and CakePHP 2 via interchangeable presets.
+# Manages a shared registry to prevent port conflicts across projects.
 #
 # Usage: shipyard [options]
 # ==============================================================================
@@ -42,6 +43,8 @@ readonly EXIT_REGISTRY_CORRUPTED=9
 readonly EXIT_DOCKER_NOT_INSTALLED=10
 readonly EXIT_DOCKER_NOT_RUNNING=11
 readonly EXIT_ENV_ALREADY_CONFIGURED=12
+readonly EXIT_TEMPLATE_FETCH_FAILED=13
+readonly EXIT_CAKE_LAYOUT_NOT_FOUND=14
 readonly EXIT_USER_CANCELLED=130
 
 # File paths
@@ -73,6 +76,24 @@ declare -a PORT_ASSIGNMENT_VALUES=()
 # Project state
 PROJECT_NAME=""
 
+# Preset state (drives compose scaffolding for legacy presets)
+PRESET=""
+SELECTED_PHP_VERSION=""
+SELECTED_MYSQL_VERSION=""
+SELECTED_NODE_VERSION=""
+OPTIONAL_SERVICES=""
+MEILISEARCH_VERSION=""
+ELASTICSEARCH_VERSION=""
+
+# CakePHP 2 state (resolved during cakephp-2 scaffolding)
+CAKE_CONFIG_DIR=""        # "app/Config" or "Config"
+NGINX_DOCROOT=""          # e.g. "public_html", "app/webroot", "webroot"
+CAKE_SOURCE_ENV_FOLDER="" # absolute or relative path to the env folder being cloned
+CAKE_CONSOLE_WORKDIR=""   # `-w` value for `docker compose exec`, e.g. "/var/www/html/app" or "/var/www/html"
+
+# Files that were created or patched during init — printed at end as a review checklist
+declare -a REVIEW_FILES=()
+
 # Domain registration state
 DOMAIN_REGISTERED=false
 REGISTERED_DOMAIN=""
@@ -84,6 +105,9 @@ USE_SECURE_PROXY=true  # Whether to use --secure flag for HTTPS
 # User input collection (collected upfront)
 declare -a COMPOSER_REPO_USERNAMES=()
 declare -a COMPOSER_REPO_PASSWORDS=()
+declare -a NPM_REGISTRY_SCOPES=()
+declare -a NPM_REGISTRY_HOSTS=()
+declare -a NPM_REGISTRY_TOKENS=()
 REGISTER_DOMAIN=false
 USER_DOMAIN_NAME=""
 RUN_POST_SETUP=""
@@ -131,6 +155,10 @@ log_error() {
     echo -e "${RED}Error:${NC} $1" >&2
 }
 
+log_warning() {
+    echo -e "${YELLOW}Warning:${NC} $1" >&2
+}
+
 exit_with_error() {
     local exit_code=$1
     shift
@@ -152,14 +180,15 @@ show_help() {
 
     cat << EOF
 Usage:
-  shipyard init         Initialize a Laravel Sail project
+  shipyard init         Initialize a PHP project (Sail, Laravel Legacy, or CakePHP 2)
   shipyard list         List all registered projects
   shipyard cleanup      Clean up Docker resources and stale projects
   shipyard [options]
 
 Commands:
-  init                  Set up the Laravel Sail project in current directory
-                        (automatic port assignment, domain configuration, etc.)
+  init                  Set up the project in current directory; the wizard
+                        prompts for a preset (Sail / Laravel Legacy / CakePHP 2)
+                        and handles port assignment, scaffolding, and domain config
   list                  Show all registered projects from config file
   cleanup               Clean up stale projects from registry
 
@@ -196,7 +225,7 @@ show_title() {
             /_/    /____/
 EOF
     echo -e "${NC}"
-    echo -e "⚓ ${DIM}v${VERSION} - Laravel Sail Project Setup${NC}"
+    echo -e "⚓ ${DIM}v${VERSION} - PHP Project Setup${NC}"
     echo ""
 }
 
@@ -541,6 +570,13 @@ validate_env_file() {
             log_info "Creating .env from .env.example..."
             cp .env.example "$ENV_FILE"
             log_success ".env file created from .env.example"
+        elif [ "$PRESET" = "laravel-legacy" ] || [ "$PRESET" = "cakephp-2" ]; then
+            # Pre-Sail Laravel projects often have no .env.example, and Cake 2
+            # predates .env entirely. Either way, start fresh so COMPOSE_PROJECT_NAME
+            # and the assigned port vars have somewhere to land.
+            log_info "No .env or .env.example — creating empty .env"
+            : > "$ENV_FILE"
+            log_success "Empty .env file created"
         else
             exit_with_error $EXIT_ENV_NOT_FOUND \
                 ".env file not found and .env.example does not exist.
@@ -551,17 +587,55 @@ Please create a .env file or .env.example before running this script."
     fi
 }
 
+# Returns the directory containing composer.json (relative to cwd), or empty
+# if not found. Cake 2 projects sometimes keep it under app/ instead of the
+# repo root, so we check both for that preset.
+find_composer_json_dir() {
+    if [ -f "composer.json" ]; then
+        echo "."
+    elif [ "$PRESET" = "cakephp-2" ] && [ -f "app/composer.json" ]; then
+        echo "app"
+    fi
+}
+
+# Detect the major composer version a project was generated against by sniffing
+# composer.lock. composer 2 lockfiles include "plugin-api-version"; composer 1
+# lockfiles include a top-level "hash". Falls back to a PHP-version heuristic
+# when no lockfile is present (fresh projects).
+detect_composer_version() {
+    local composer_dir="$1"
+    local lock="$composer_dir/composer.lock"
+
+    if [ -f "$lock" ]; then
+        if grep -q '"plugin-api-version"' "$lock"; then
+            echo "2"
+            return
+        fi
+        if grep -q '"hash":' "$lock"; then
+            echo "1"
+            return
+        fi
+    fi
+
+    # No lockfile — fall back on PHP version. composer 2 dropped < 7.2.5.
+    case "$SELECTED_PHP_VERSION" in
+        5.6|7.0|7.1) echo "1" ;;
+        *)           echo "2" ;;
+    esac
+}
+
 extract_composer_repositories() {
-    # Extract repository URLs from composer.json
-    if [ ! -f "composer.json" ]; then
-        echo ""
-        log_error "composer.json not found in current directory"
-        exit 1
+    # Extract repository URLs from composer.json.
+    # Returns empty when composer.json is absent (some old Cake 2 projects predate composer).
+    local dir
+    dir=$(find_composer_json_dir)
+    if [ -z "$dir" ]; then
+        return 0
     fi
 
     # Use grep and sed to extract repository URLs (simple parsing, works for most cases)
     # This extracts URLs from the "repositories" array and removes https:// prefix
-    grep -A 2 '"type".*"composer"' composer.json | grep '"url"' | sed -E 's/.*"url"[[:space:]]*:[[:space:]]*"https?:\/\/([^"]+)".*/\1/'
+    grep -A 2 '"type".*"composer"' "$dir/composer.json" | grep '"url"' | sed -E 's/.*"url"[[:space:]]*:[[:space:]]*"https?:\/\/([^"]+)".*/\1/'
 }
 
 detect_php_version() {
@@ -607,7 +681,17 @@ write_composer_auth_json() {
         return 0
     fi
 
-    log_info "Writing auth.json with private repository credentials..."
+    # Write auth.json next to composer.json so composer picks it up automatically.
+    local composer_dir
+    composer_dir=$(find_composer_json_dir)
+    local auth_path
+    if [ "$composer_dir" = "." ]; then
+        auth_path="auth.json"
+    else
+        auth_path="$composer_dir/auth.json"
+    fi
+
+    log_info "Writing $auth_path with private repository credentials..."
 
     # Build the http-basic JSON block
     local http_basic_entries=""
@@ -625,7 +709,7 @@ write_composer_auth_json() {
         repo_index=$((repo_index + 1))
     done
 
-    cat > auth.json <<EOF
+    cat > "$auth_path" <<EOF
 {
     "http-basic": {
 $http_basic_entries
@@ -633,51 +717,200 @@ $http_basic_entries
 }
 EOF
 
-    log_success "auth.json written"
+    log_success "$auth_path written"
 
-    # Ensure auth.json is in .gitignore
+    # Ensure auth.json is in .gitignore (path-aware so we cover app/auth.json too)
     if [ -f ".gitignore" ]; then
-        if ! grep -qxF "auth.json" .gitignore; then
-            echo "auth.json" >> .gitignore
+        if ! grep -qxF "$auth_path" .gitignore; then
+            echo "$auth_path" >> .gitignore
             log_success "auth.json added to .gitignore"
         fi
     else
-        echo "auth.json" > .gitignore
-        log_success ".gitignore created with auth.json"
+        echo "$auth_path" > .gitignore
+        log_success ".gitignore created with $auth_path"
+    fi
+
+    echo ""
+}
+
+prompt_npm_credentials() {
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🔑 Private npm registries${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${DIM}If this project depends on private npm packages (FontAwesome Pro,${NC}"
+    echo -e "${DIM}internal company registries, etc.), Shipyard can drop the scope${NC}"
+    echo -e "${DIM}mapping + auth token into .npmrc so npm install works in-container.${NC}"
+    echo ""
+
+    local response
+    echo -n "Configure a private npm registry? [y/N]: "
+    read -r response
+    response=${response:-N}
+
+    while [[ "$response" =~ ^[Yy]$ ]]; do
+        local scope registry_url host token
+        echo ""
+
+        echo -n "  Scope (e.g. @fortawesome): "
+        read -r scope
+        # Make sure it starts with @ so npm treats it as a scope key
+        case "$scope" in
+            @*) ;;
+            "") log_warning "Scope cannot be empty — skipping"; scope="" ;;
+            *)  scope="@$scope" ;;
+        esac
+
+        if [ -n "$scope" ]; then
+            echo -n "  Registry URL (e.g. https://npm.fontawesome.com/): "
+            read -r registry_url
+            if [ -z "$registry_url" ]; then
+                log_warning "Registry URL cannot be empty — skipping"
+            else
+                # Normalise: strip protocol + trailing slash to get the bare host
+                host="${registry_url#https://}"
+                host="${host#http://}"
+                host="${host%/}"
+
+                echo -n "  Token (input hidden): "
+                read -s -r token
+                echo ""
+
+                if [ -z "$token" ]; then
+                    log_warning "Token cannot be empty — skipping this registry"
+                else
+                    NPM_REGISTRY_SCOPES+=("$scope")
+                    NPM_REGISTRY_HOSTS+=("$host")
+                    NPM_REGISTRY_TOKENS+=("$token")
+                    log_success "Stored npm credentials for $scope → $host"
+                fi
+            fi
+        fi
+
+        echo ""
+        echo -n "Add another? [y/N]: "
+        read -r response
+        response=${response:-N}
+    done
+}
+
+# Write the collected scope mappings + auth tokens to a project-local .npmrc
+# (creating or appending). Idempotent: a re-run replaces lines for the same
+# scope/host instead of duplicating them.
+write_npmrc() {
+    if [ ${#NPM_REGISTRY_SCOPES[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    local npmrc=".npmrc"
+    touch "$npmrc"
+
+    local i scope host token url
+    for (( i = 0; i < ${#NPM_REGISTRY_SCOPES[@]}; i++ )); do
+        scope="${NPM_REGISTRY_SCOPES[$i]}"
+        host="${NPM_REGISTRY_HOSTS[$i]}"
+        token="${NPM_REGISTRY_TOKENS[$i]}"
+        url="https://${host}/"
+
+        # Remove any prior entries for this scope or host before re-adding.
+        if [ -s "$npmrc" ]; then
+            local tmp="${npmrc}.shipyard.tmp"
+            grep -v -E "^${scope}:registry=|^//${host}/:_authToken=" "$npmrc" > "$tmp" || true
+            mv "$tmp" "$npmrc"
+        fi
+
+        printf '%s:registry=%s\n'      "$scope" "$url"   >> "$npmrc"
+        printf '//%s/:_authToken=%s\n' "$host"  "$token" >> "$npmrc"
+    done
+
+    log_success "Wrote npm registry credentials to .npmrc"
+    REVIEW_FILES+=(".npmrc")
+
+    # Keep tokens out of git. Same pattern as auth.json above.
+    if [ -f ".gitignore" ]; then
+        if ! grep -qxF ".npmrc" .gitignore; then
+            echo ".npmrc" >> .gitignore
+            log_success ".npmrc added to .gitignore"
+        fi
+    else
+        echo ".npmrc" > .gitignore
+        log_success ".gitignore created with .npmrc"
     fi
 
     echo ""
 }
 
 run_composer_install() {
+    # cake-2 projects may predate composer entirely — skip if no composer.json
+    # at either the repo root or under app/.
+    local composer_dir
+    composer_dir=$(find_composer_json_dir)
+    if [ "$PRESET" = "cakephp-2" ] && [ -z "$composer_dir" ]; then
+        log_info "No composer.json — skipping composer install (cakephp-2 preset)"
+        echo ""
+        return 0
+    fi
+
     echo ""
     log_info "=========================================="
     log_info "Installing Composer dependencies..."
     log_info "=========================================="
     echo ""
 
-    # Detect PHP version from docker-compose.yml
-    local php_version=$(detect_php_version)
-    local composer_php_version="$php_version"
-
-    # Use PHP 8.4 composer image when project runtime is 8.5 (see https://github.com/laravel/sail-server/pull/35)
-    if [ "$php_version" = "85" ]; then
-        composer_php_version="84"
-    fi
-
-    local composer_image="laravelsail/php${composer_php_version}-composer:latest"
-
-    if [ "$php_version" = "$composer_php_version" ]; then
-        log_info "Using PHP ${php_version:0:1}.${php_version:1} composer image: $composer_image"
+    local composer_image
+    if [ "$PRESET" = "sail" ]; then
+        # Sail: keep the matching laravelsail/phpXY-composer image so the
+        # extension set matches the runtime container.
+        local php_version=$(detect_php_version)
+        local composer_php_version="$php_version"
+        # Use PHP 8.4 composer image when project runtime is 8.5 (see https://github.com/laravel/sail-server/pull/35)
+        if [ "$php_version" = "85" ]; then
+            composer_php_version="84"
+        fi
+        composer_image="laravelsail/php${composer_php_version}-composer:latest"
+        if [ "$php_version" = "$composer_php_version" ]; then
+            log_info "Using PHP ${php_version:0:1}.${php_version:1} composer image: $composer_image"
+        else
+            log_info "Detected PHP ${php_version:0:1}.${php_version:1}; using PHP ${composer_php_version:0:1}.${composer_php_version:1} composer image: $composer_image"
+        fi
     else
-        log_info "Detected PHP ${php_version:0:1}.${php_version:1}; using PHP ${composer_php_version:0:1}.${composer_php_version:1} composer image: $composer_image"
+        # Legacy presets: official composer image. Detect from composer.lock if
+        # present (most reliable), otherwise fall back to PHP version.
+        local composer_major
+        composer_major=$(detect_composer_version "$composer_dir")
+        composer_image="composer:$composer_major"
+        if [ -f "$composer_dir/composer.lock" ]; then
+            log_info "Using $composer_image (detected from $composer_dir/composer.lock)"
+        else
+            log_info "Using $composer_image (no composer.lock — defaulted by PHP $SELECTED_PHP_VERSION)"
+        fi
     fi
     echo ""
 
-    log_info "Running composer install via Docker..."
+    # For sail there's no detected composer_dir (we don't probe); root is correct.
+    local workdir="/var/www/html"
+    if [ -n "$composer_dir" ] && [ "$composer_dir" != "." ]; then
+        workdir="/var/www/html/$composer_dir"
+        log_info "Running composer install in container path $workdir (composer.json under $composer_dir/)..."
+    else
+        log_info "Running composer install via Docker..."
+    fi
+
+    # The legacy composer sidecar runs whatever PHP version composer:1 / :2 ships
+    # (PHP 7.x and 8.4 today), which usually mismatches the project's runtime.
+    # Skipping post-install scripts avoids running things like `artisan
+    # package:discover` under the wrong PHP — those need to run inside the
+    # project's own `php` container after `docker compose up`. Sail's per-PHP
+    # composer images match the project runtime, so scripts are safe there.
+    local extra_flags="--ignore-platform-reqs"
+    if [ "$PRESET" != "sail" ]; then
+        extra_flags="$extra_flags --no-scripts"
+        log_info "Using --no-scripts (legacy preset): run post-install scripts inside the project's php container instead."
+    fi
     echo ""
 
-    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w /var/www/html "$composer_image" composer install --ignore-platform-reqs
+    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/var/www/html" -w "$workdir" "$composer_image" composer install $extra_flags
 
     if [ $? -ne 0 ]; then
         echo ""
@@ -1369,37 +1602,41 @@ append_ports_to_env() {
         # Always add COMPOSE_PROJECT_NAME (normalized from path)
         echo "COMPOSE_PROJECT_NAME=$PROJECT_NAME"
 
-        # Add APP_URL and ASSET_URL only for Laravel projects
-        if [ -n "$app_port" ]; then
-            if [ "$DOMAIN_REGISTERED" = true ]; then
-                # Use domain with protocol based on secure setting
-                if [ "$USE_SECURE_PROXY" = true ]; then
-                    echo "APP_URL=https://${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+        # Laravel-specific app/asset/vite/mix vars — skipped for cakephp-2
+        # since Cake 2 doesn't read .env and these would just be misleading.
+        if [ "$PRESET" != "cakephp-2" ]; then
+            # Add APP_URL and ASSET_URL only for Laravel projects
+            if [ -n "$app_port" ]; then
+                if [ "$DOMAIN_REGISTERED" = true ]; then
+                    # Use domain with protocol based on secure setting
+                    if [ "$USE_SECURE_PROXY" = true ]; then
+                        echo "APP_URL=https://${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+                    else
+                        echo "APP_URL=http://${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+                    fi
                 else
-                    echo "APP_URL=http://${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+                    # Fall back to localhost
+                    echo "APP_URL=http://localhost:${app_port}"
                 fi
-            else
-                # Fall back to localhost
-                echo "APP_URL=http://localhost:${app_port}"
+                echo "ASSET_URL=\"\${APP_URL}\""
             fi
-            echo "ASSET_URL=\"\${APP_URL}\""
-        fi
 
-        # Add VITE_SERVER_HOST only when Vite is installed
-        if [ -n "$app_port" ] && is_vite_installed; then
-            if [ "$DOMAIN_REGISTERED" = true ]; then
-                echo "VITE_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
-            else
-                echo "VITE_SERVER_HOST=localhost"
+            # Add VITE_SERVER_HOST only when Vite is installed
+            if [ -n "$app_port" ] && is_vite_installed; then
+                if [ "$DOMAIN_REGISTERED" = true ]; then
+                    echo "VITE_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+                else
+                    echo "VITE_SERVER_HOST=localhost"
+                fi
             fi
-        fi
 
-        # Add MIX_SERVER_HOST only when Laravel Mix is installed
-        if [ -n "$app_port" ] && is_laravel_mix_installed; then
-            if [ "$DOMAIN_REGISTERED" = true ]; then
-                echo "MIX_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
-            else
-                echo "MIX_SERVER_HOST=localhost"
+            # Add MIX_SERVER_HOST only when Laravel Mix is installed
+            if [ -n "$app_port" ] && is_laravel_mix_installed; then
+                if [ "$DOMAIN_REGISTERED" = true ]; then
+                    echo "MIX_SERVER_HOST=${REGISTERED_DOMAIN}.${DOMAIN_TLD}"
+                else
+                    echo "MIX_SERVER_HOST=localhost"
+                fi
             fi
         fi
 
@@ -1408,17 +1645,41 @@ append_ports_to_env() {
             echo "$var_name=$(get_port_assignment "$var_name")"
         done
 
+        # Point pre-Sail Laravel projects at the docker service hostnames.
+        # Sail's own .env.example already has these; cakephp-2 doesn't read .env.
+        if [ "$PRESET" = "laravel-legacy" ]; then
+            echo ""
+            echo "# Auto-managed docker service connections (via shipyard.sh)"
+            echo "DB_CONNECTION=mysql"
+            echo "DB_HOST=mysql"
+            echo "DB_PORT=3306"
+            echo "DB_DATABASE=$PROJECT_NAME"
+            echo "DB_USERNAME=sail"
+            echo "DB_PASSWORD=password"
+            echo "REDIS_HOST=redis"
+            echo "REDIS_PASSWORD=null"
+            echo "REDIS_PORT=6379"
+            echo "MAIL_MAILER=smtp"
+            echo "MAIL_HOST=mailpit"
+            echo "MAIL_PORT=1025"
+            echo "MAIL_USERNAME=null"
+            echo "MAIL_PASSWORD=null"
+            echo "MAIL_ENCRYPTION=null"
+        fi
+
         # Add blank line separator
         echo ""
 
-        # Copy existing .env content, but skip COMPOSE_PROJECT_NAME, APP_URL, ASSET_URL, VITE_SERVER_HOST, and MIX_SERVER_HOST
+        # Copy existing .env content, but skip keys we're managing at the top
+        # so the final file ends up with single, authoritative definitions.
         while IFS= read -r line; do
-            # Skip lines we're managing at the top
             if [[ ! "$line" =~ ^COMPOSE_PROJECT_NAME= ]] && \
                [[ ! "$line" =~ ^APP_URL= ]] && \
                [[ ! "$line" =~ ^ASSET_URL= ]] && \
                [[ ! "$line" =~ ^VITE_SERVER_HOST= ]] && \
-               [[ ! "$line" =~ ^MIX_SERVER_HOST= ]]; then
+               [[ ! "$line" =~ ^MIX_SERVER_HOST= ]] && \
+               { [ "$PRESET" != "laravel-legacy" ] || \
+                 [[ ! "$line" =~ ^(DB_CONNECTION|DB_HOST|DB_PORT|DB_DATABASE|DB_USERNAME|DB_PASSWORD|REDIS_HOST|REDIS_PASSWORD|REDIS_PORT|MAIL_MAILER|MAIL_HOST|MAIL_PORT|MAIL_USERNAME|MAIL_PASSWORD|MAIL_ENCRYPTION)= ]]; }; then
                 echo "$line"
             fi
         done < "$ENV_FILE"
@@ -1660,12 +1921,18 @@ collect_user_input() {
     echo ""
 
     # 1. Collect Composer credentials for private repositories
-    if [ ! -f "composer.json" ]; then
+    local repositories=()
+    local composer_dir
+    composer_dir=$(find_composer_json_dir)
+    if [ -n "$composer_dir" ]; then
+        repositories=($(extract_composer_repositories))
+    elif [ "$PRESET" = "cakephp-2" ]; then
+        # Old Cake 2 projects may predate composer entirely — skip silently.
+        log_info "No composer.json found — skipping composer credential collection"
+    else
         log_error "composer.json not found in current directory"
         exit 1
     fi
-
-    local repositories=($(extract_composer_repositories))
 
     if [ ${#repositories[@]} -gt 0 ]; then
         echo ""
@@ -1706,6 +1973,11 @@ collect_user_input() {
 
             repo_index=$((repo_index + 1))
         done
+    fi
+
+    # 1b. Collect private npm registry credentials if there's a package.json
+    if [ -f "package.json" ]; then
+        prompt_npm_credentials
     fi
 
     # 2. Detect available local dev tools (Valet/Herd)
@@ -1850,13 +2122,25 @@ collect_user_input() {
     echo -e "${BOLD}⚡ Post-Setup Automation${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo -e "${DIM}After port assignment, these commands can be run:${NC}"
-    echo -e "  ${DIM}1.${NC} Start Docker containers ${DIM}(vendor/bin/sail up -d)${NC}"
-    echo -e "  ${DIM}2.${NC} Run Composer setup ${DIM}(vendor/bin/sail composer setup)${NC}"
-    echo ""
-    echo -n "Run these commands automatically? [Y/n]: "
-    read -r RUN_POST_SETUP
-    RUN_POST_SETUP=${RUN_POST_SETUP:-Y}
+    if [ "$PRESET" = "sail" ]; then
+        echo -e "${DIM}After port assignment, these commands can be run:${NC}"
+        echo -e "  ${DIM}1.${NC} Start Docker containers ${DIM}(vendor/bin/sail up -d)${NC}"
+        echo -e "  ${DIM}2.${NC} Run Composer setup ${DIM}(vendor/bin/sail composer setup)${NC}"
+        echo ""
+        echo -n "Run these commands automatically? [Y/n]: "
+        read -r RUN_POST_SETUP
+        RUN_POST_SETUP=${RUN_POST_SETUP:-Y}
+    else
+        # Legacy presets: no Sail, and composer install already ran during init.
+        # Only `docker compose up -d` is left, and the first build can take a few
+        # minutes — default the prompt to N to let the user review files first.
+        echo -e "${DIM}After scaffolding, Docker containers can be started with:${NC}"
+        echo -e "  ${DIM}•${NC} ${DIM}docker compose up -d${NC} ${DIM}(builds the Dockerfile on first run — may take a few minutes)${NC}"
+        echo ""
+        echo -n "Start containers automatically? [y/N]: "
+        read -r RUN_POST_SETUP
+        RUN_POST_SETUP=${RUN_POST_SETUP:-N}
+    fi
 
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -1894,7 +2178,11 @@ collect_user_input() {
         fi
     fi
     if [[ "$RUN_POST_SETUP" =~ ^[Yy]$ ]]; then
-        echo -e "  ${DIM}5.${NC} Start Docker containers and run Composer setup"
+        if [ "$PRESET" = "sail" ]; then
+            echo -e "  ${DIM}5.${NC} Start Docker containers and run Composer setup"
+        else
+            echo -e "  ${DIM}5.${NC} Start Docker containers (docker compose up -d)"
+        fi
     fi
     echo ""
     read -r -p "Continue with setup? [Y/n] " confirm
@@ -1911,6 +2199,795 @@ collect_user_input() {
     echo ""
     echo -e "${DIM}Starting setup...${NC}"
     echo ""
+}
+
+# ==============================================================================
+# PRESET SCAFFOLDING FUNCTIONS
+# ==============================================================================
+
+# Internal: fetch a template file from GitHub and return its raw content on stdout.
+# Hard-fails the script if the fetch errors out (no offline fallback).
+_fetch_raw_template() {
+    local rel="$1"
+    local ref="${SHIPYARD_TEMPLATE_REF:-v$VERSION}"
+    local url="https://raw.githubusercontent.com/wotzebra/shipyard/${ref}/templates/${rel}"
+    local content
+    if ! content=$(curl -fsSL "$url" 2>/dev/null); then
+        exit_with_error $EXIT_TEMPLATE_FETCH_FAILED \
+            "Failed to fetch template: $url
+Set SHIPYARD_TEMPLATE_REF to a branch/tag where the file exists, or check your network."
+    fi
+    printf '%s' "$content"
+}
+
+# Internal: substitute the global {{VAR}} placeholders in a template body.
+# Port placeholders are resolved via get_port_assignment so they must already
+# be assigned before this runs.
+_substitute_template_vars() {
+    local content="$1"
+
+    content="${content//\{\{PROJECT_NAME\}\}/$PROJECT_NAME}"
+    content="${content//\{\{PHP_VERSION\}\}/$SELECTED_PHP_VERSION}"
+    content="${content//\{\{MYSQL_VERSION\}\}/$SELECTED_MYSQL_VERSION}"
+    content="${content//\{\{MEILISEARCH_VERSION\}\}/$MEILISEARCH_VERSION}"
+    content="${content//\{\{ELASTICSEARCH_VERSION\}\}/$ELASTICSEARCH_VERSION}"
+    content="${content//\{\{NGINX_DOCROOT\}\}/$NGINX_DOCROOT}"
+    content="${content//\{\{CAKE_CONSOLE_WORKDIR\}\}/$CAKE_CONSOLE_WORKDIR}"
+
+    local port_var port_val
+    for port_var in APP_PORT FORWARD_DB_PORT FORWARD_REDIS_PORT FORWARD_MAILPIT_PORT \
+                    FORWARD_MEILISEARCH_PORT FORWARD_ELASTICSEARCH_PORT; do
+        port_val=$(get_port_assignment "$port_var")
+        content="${content//\{\{$port_var\}\}/$port_val}"
+    done
+
+    printf '%s' "$content"
+}
+
+# Internal: replace a single marker line in a multi-line template with replacement
+# content. When replacement is empty the marker line disappears entirely.
+_replace_marker_line() {
+    local template="$1"
+    local marker="$2"
+    local replacement="$3"
+    local output=""
+    local line
+
+    while IFS= read -r line; do
+        if [ "$line" = "$marker" ]; then
+            output+="$replacement"
+        else
+            output+="$line"$'\n'
+        fi
+    done <<< "$template"
+
+    printf '%s' "$output"
+}
+
+# Fetch a template, substitute {{VAR}} placeholders, write to dest atomically.
+fetch_template() {
+    local rel="$1"
+    local dest="$2"
+    local content
+
+    content=$(_fetch_raw_template "$rel")
+    content=$(_substitute_template_vars "$content")
+
+    # Note the `\n` — command substitution strips trailing newlines, so we
+    # restore one to keep files POSIX-friendly (`text file should end with newline`).
+    local tmp="${dest}.shipyard.tmp"
+    printf '%s\n' "$content" > "$tmp"
+    if ! mv "$tmp" "$dest"; then
+        rm -f "$tmp"
+        exit_with_error $EXIT_TEMPLATE_FETCH_FAILED "Failed to write template to: $dest"
+    fi
+}
+
+# Assemble service + volume blocks from the optional service fragments the
+# user opted into. Results are written to ASSEMBLED_SERVICES_BLOCK and
+# ASSEMBLED_VOLUMES_BLOCK so callers can slot them into compose templates.
+ASSEMBLED_SERVICES_BLOCK=""
+ASSEMBLED_VOLUMES_BLOCK=""
+
+assemble_optional_services() {
+    ASSEMBLED_SERVICES_BLOCK=""
+    ASSEMBLED_VOLUMES_BLOCK=""
+
+    local service fragment svc vol
+    for service in $OPTIONAL_SERVICES; do
+        fragment=$(_fetch_raw_template "services/${service}.yml")
+        # Split on the marker line: text before MARKER goes into services,
+        # text after MARKER goes into volumes. Strip the newline that follows
+        # the marker so each block starts at column 0, then ensure each block
+        # ends with exactly one newline so multiple opted-in services stack
+        # without their lines colliding.
+        svc="${fragment%%# === SHIPYARD:VOLUME ===*}"
+        vol="${fragment##*# === SHIPYARD:VOLUME ===}"
+        vol="${vol#$'\n'}"
+        case "$svc" in *$'\n') ;; *) svc+=$'\n' ;; esac
+        case "$vol" in *$'\n') ;; *) vol+=$'\n' ;; esac
+        ASSEMBLED_SERVICES_BLOCK+="$svc"
+        ASSEMBLED_VOLUMES_BLOCK+="$vol"
+    done
+}
+
+# Ensure .nvmrc exists at the project root so the Dockerfile's `COPY .nvmrc`
+# succeeds. If the project already has one we leave it alone; otherwise write
+# the version chosen during the wizard.
+ensure_nvmrc() {
+    if [ -f ".nvmrc" ]; then
+        return
+    fi
+    printf '%s\n' "$SELECTED_NODE_VERSION" > .nvmrc
+    log_success "Wrote .nvmrc ($SELECTED_NODE_VERSION)"
+    REVIEW_FILES+=(".nvmrc")
+}
+
+# Compute the port variable list for legacy presets (no compose file exists yet,
+# so we can't use extract_port_vars). Output matches extract_port_vars format:
+# one VAR:DEFAULT_PORT per line.
+compute_legacy_port_vars() {
+    echo "APP_PORT:80"
+    echo "FORWARD_DB_PORT:3306"
+    # cakephp-2 has no redis service in its base stack
+    if [ "$PRESET" != "cakephp-2" ]; then
+        echo "FORWARD_REDIS_PORT:6379"
+    fi
+    echo "FORWARD_MAILPIT_PORT:8025"
+
+    local service
+    for service in $OPTIONAL_SERVICES; do
+        case "$service" in
+            meilisearch)   echo "FORWARD_MEILISEARCH_PORT:7700" ;;
+            elasticsearch) echo "FORWARD_ELASTICSEARCH_PORT:9200" ;;
+        esac
+    done
+}
+
+# Scaffold the full docker stack for a legacy preset. Must be called after
+# port assignment so {{*_PORT}} placeholders can resolve.
+scaffold_stack() {
+    local preset="$1"
+
+    # cake-2 needs the project layout + docroot resolved before nginx.conf is
+    # substituted, since the docroot lands in the nginx template.
+    if [ "$preset" = "cakephp-2" ]; then
+        detect_cake_config_dir
+        prompt_cake_docroot
+    fi
+
+    echo ""
+    log_info "Scaffolding $preset stack..."
+
+    # The Dockerfile `COPY .nvmrc /tmp/.nvmrc` line needs .nvmrc present in
+    # the build context. Write one if the project doesn't already have it.
+    ensure_nvmrc
+
+    assemble_optional_services
+
+    local compose
+    compose=$(_fetch_raw_template "${preset}/docker-compose.yml")
+    compose=$(_replace_marker_line "$compose" '    # {{OPTIONAL_SERVICES}}' "$ASSEMBLED_SERVICES_BLOCK")
+    compose=$(_replace_marker_line "$compose" '    # {{OPTIONAL_VOLUMES}}' "$ASSEMBLED_VOLUMES_BLOCK")
+
+    # mysql:5.7 is amd64-only — inject `platform: linux/amd64` so Apple Silicon
+    # hosts can pull it under emulation. mysql:8.0 and 8.4 are multi-arch.
+    local mysql_platform=""
+    case "$SELECTED_MYSQL_VERSION" in
+        5.7) mysql_platform="        platform: 'linux/amd64'"$'\n' ;;
+    esac
+    compose=$(_replace_marker_line "$compose" '        # {{MYSQL_PLATFORM}}' "$mysql_platform")
+
+    # MySQL 8 defaults to caching_sha2_password, which legacy PHP mysqlnd builds
+    # don't speak (SQLSTATE[HY000] [2054]). Force the native plugin on. The
+    # 8.0 flag was removed in 8.4; 8.4 also disables the plugin by default and
+    # needs --authentication-policy so MYSQL_USER is created with it.
+    local mysql_auth=""
+    case "$SELECTED_MYSQL_VERSION" in
+        8.0) mysql_auth="        command: ['--default-authentication-plugin=mysql_native_password']"$'\n' ;;
+        8.4) mysql_auth="        command: ['--mysql-native-password=ON', '--authentication-policy=mysql_native_password']"$'\n' ;;
+    esac
+    compose=$(_replace_marker_line "$compose" '        # {{MYSQL_AUTH_PLUGIN}}' "$mysql_auth")
+
+    compose=$(_substitute_template_vars "$compose")
+
+    local tmp="${COMPOSE_FILE}.shipyard.tmp"
+    printf '%s\n' "$compose" > "$tmp"
+    if ! mv "$tmp" "$COMPOSE_FILE"; then
+        rm -f "$tmp"
+        exit_with_error $EXIT_TEMPLATE_FETCH_FAILED "Failed to write $COMPOSE_FILE"
+    fi
+    log_success "Wrote $COMPOSE_FILE"
+    REVIEW_FILES+=("$COMPOSE_FILE")
+
+    fetch_template "${preset}/Dockerfile" "Dockerfile"
+    log_success "Wrote Dockerfile"
+    REVIEW_FILES+=("Dockerfile")
+
+    fetch_template "${preset}/nginx.conf" "nginx.conf"
+    log_success "Wrote nginx.conf"
+    REVIEW_FILES+=("nginx.conf")
+
+    fetch_template "${preset}/php.ini" "php.ini"
+    log_success "Wrote php.ini"
+    REVIEW_FILES+=("php.ini")
+
+    # .nvmrc was potentially written earlier in scaffold_stack — mark it for
+    # review only if we created it this run (ensure_nvmrc appends to REVIEW_FILES).
+
+    # Per-project docs: SHIPYARD.md cheat sheet + a pointer in the project's
+    # existing README (if any) so future devs find it.
+    fetch_template "${preset}/SHIPYARD.md" "SHIPYARD.md"
+    log_success "Wrote SHIPYARD.md"
+    REVIEW_FILES+=("SHIPYARD.md")
+    update_project_readme
+
+    # cake-2 specific: clone an existing env folder, patch the docker bits,
+    # and generate the per-machine local.php selector.
+    if [ "$preset" = "cakephp-2" ]; then
+        scaffold_cakephp_env
+    fi
+}
+
+# Append a "Docker development setup" pointer to the project's README.md, or
+# refresh the auto-managed block if it already exists. No-op when there's no
+# README.md — SHIPYARD.md alone is enough in that case.
+update_project_readme() {
+    local readme="README.md"
+    if [ ! -f "$readme" ]; then
+        log_info "No README.md found — skipping README pointer (SHIPYARD.md still written)"
+        return
+    fi
+
+    local marker_begin="<!-- shipyard:docker-setup -->"
+    local marker_end="<!-- /shipyard:docker-setup -->"
+    local section
+    section="$marker_begin
+<!-- This block is auto-managed by Shipyard; edits between these markers
+     will be replaced on the next \`shipyard init\` run. -->
+
+## Docker development setup
+
+This project uses a Dockerized PHP stack scaffolded by [Shipyard](https://github.com/wotzebra/shipyard).
+See [\`SHIPYARD.md\`](SHIPYARD.md) for service details, common commands, and credentials.
+$marker_end"
+
+    if grep -qF "$marker_begin" "$readme"; then
+        # Replace the existing managed block in place. Pure bash so we don't
+        # have to escape newlines through awk -v.
+        local tmp="${readme}.shipyard.tmp"
+        local in_block=0
+        local emitted=0
+        {
+            local line
+            while IFS= read -r line || [ -n "$line" ]; do
+                if [ "$in_block" = 0 ] && [[ "$line" == *"$marker_begin"* ]]; then
+                    in_block=1
+                    if [ "$emitted" = 0 ]; then
+                        printf '%s\n' "$section"
+                        emitted=1
+                    fi
+                    continue
+                fi
+                if [ "$in_block" = 1 ] && [[ "$line" == *"$marker_end"* ]]; then
+                    in_block=0
+                    continue
+                fi
+                if [ "$in_block" = 0 ]; then
+                    printf '%s\n' "$line"
+                fi
+            done < "$readme"
+        } > "$tmp"
+        mv "$tmp" "$readme"
+        log_success "Refreshed Shipyard block in $readme"
+    else
+        # Append a fresh block at the end of the file, with one blank line
+        # separating it from whatever was last in the README.
+        printf '\n%s\n' "$section" >> "$readme"
+        log_success "Added Shipyard pointer to $readme"
+    fi
+    REVIEW_FILES+=("$readme")
+}
+
+# ==============================================================================
+# CAKEPHP 2 SCAFFOLDING HELPERS
+# ==============================================================================
+
+detect_cake_config_dir() {
+    if [ -d "app/Config" ]; then
+        CAKE_CONFIG_DIR="app/Config"
+    elif [ -d "Config" ]; then
+        CAKE_CONFIG_DIR="Config"
+    else
+        exit_with_error $EXIT_CAKE_LAYOUT_NOT_FOUND \
+            "CakePHP 2 layout not found.
+Expected either 'app/Config/' or 'Config/' in: $(pwd)
+Are you running 'shipyard init' from the project root?"
+    fi
+    log_success "Found CakePHP 2 config dir: $CAKE_CONFIG_DIR"
+
+    # Detect where the Cake Console binary lives — wotzebra projects often
+    # keep it at the project root (alongside Config under app/) instead of
+    # the framework default at app/Console/. The substituted SHIPYARD.md
+    # uses this to point users at the right `-w` for docker compose exec.
+    if [ -x "Console/cake" ] || [ -f "Console/cake" ]; then
+        CAKE_CONSOLE_WORKDIR="/var/www/html"
+    elif [ -x "app/Console/cake" ] || [ -f "app/Console/cake" ]; then
+        CAKE_CONSOLE_WORKDIR="/var/www/html/app"
+    else
+        # Fall back to the config dir's parent — Console is typically a sibling
+        # of Config in unconventional layouts.
+        case "$CAKE_CONFIG_DIR" in
+            app/Config) CAKE_CONSOLE_WORKDIR="/var/www/html/app" ;;
+            Config)     CAKE_CONSOLE_WORKDIR="/var/www/html" ;;
+        esac
+        log_warning "Cake Console binary not found at Console/cake or app/Console/cake — assuming workdir $CAKE_CONSOLE_WORKDIR"
+    fi
+    log_success "Cake Console workdir: $CAKE_CONSOLE_WORKDIR"
+}
+
+prompt_cake_docroot() {
+    # Callers can pre-seed NGINX_DOCROOT (handy for tests/automation).
+    if [ -n "$NGINX_DOCROOT" ]; then
+        log_success "Using preset docroot: $NGINX_DOCROOT"
+        return
+    fi
+
+    local candidates=("public_html" "app/webroot" "webroot")
+    local detected=""
+    local c
+    for c in "${candidates[@]}"; do
+        if [ -d "$c" ]; then
+            detected="$c"
+            break
+        fi
+    done
+
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}📂 Web Document Root${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+
+    if [ -n "$detected" ]; then
+        echo -e "${DIM}Detected docroot:${NC} ${BOLD}$detected${NC}"
+        echo -n "Use this? [Y/n]: "
+        local response
+        read -r response
+        response=${response:-Y}
+        if [[ "$response" =~ ^[Yy]$ ]]; then
+            NGINX_DOCROOT="$detected"
+            log_success "Docroot: $NGINX_DOCROOT"
+            return
+        fi
+    else
+        log_warning "No standard docroot found (looked for: ${candidates[*]})"
+    fi
+
+    while true; do
+        echo -n "Docroot path (relative to project root): "
+        read -r NGINX_DOCROOT
+        if [ -z "$NGINX_DOCROOT" ]; then
+            echo -e "${YELLOW}Docroot cannot be empty.${NC}"
+            continue
+        fi
+        if [ ! -d "$NGINX_DOCROOT" ]; then
+            log_warning "Path '$NGINX_DOCROOT' does not exist yet — accepting anyway."
+        fi
+        log_success "Docroot: $NGINX_DOCROOT"
+        break
+    done
+}
+
+# Find a source env folder under CAKE_CONFIG_DIR. Prefers `dev/`, otherwise
+# picks the first folder containing bootstrap.php + database.php (excluding
+# the destination `docker/`).
+detect_cake_source_env() {
+    local dev="$CAKE_CONFIG_DIR/dev"
+    if [ -d "$dev" ] && [ -f "$dev/bootstrap.php" ] && [ -f "$dev/database.php" ]; then
+        CAKE_SOURCE_ENV_FOLDER="$dev"
+        log_success "Source env folder: $CAKE_SOURCE_ENV_FOLDER"
+        return
+    fi
+
+    local entry name
+    for entry in "$CAKE_CONFIG_DIR"/*/; do
+        [ -d "$entry" ] || continue
+        name=$(basename "$entry")
+        if [ "$name" = "docker" ]; then
+            continue
+        fi
+        if [ -f "${entry}bootstrap.php" ] && [ -f "${entry}database.php" ]; then
+            CAKE_SOURCE_ENV_FOLDER="${entry%/}"
+            log_success "Source env folder: $CAKE_SOURCE_ENV_FOLDER (fallback, no dev/)"
+            return
+        fi
+    done
+
+    exit_with_error $EXIT_CAKE_LAYOUT_NOT_FOUND \
+        "No source env folder found under $CAKE_CONFIG_DIR/.
+Expected at least one subfolder (e.g. dev/) containing bootstrap.php + database.php to clone from."
+}
+
+# If docker/ already exists, prompt overwrite. Aborts on decline.
+check_cake_docker_dest() {
+    local dest="$CAKE_CONFIG_DIR/docker"
+    if [ -d "$dest" ]; then
+        echo ""
+        log_warning "$dest already exists."
+        echo -n "Overwrite it with a fresh clone of $CAKE_SOURCE_ENV_FOLDER? [y/N]: "
+        local response
+        read -r response
+        response=${response:-N}
+        if [[ ! "$response" =~ ^[Yy]$ ]]; then
+            exit_with_error $EXIT_USER_CANCELLED \
+                "Aborted: $dest already exists and overwrite declined."
+        fi
+        rm -rf "$dest"
+    fi
+}
+
+clone_cake_env_folder() {
+    local dest="$CAKE_CONFIG_DIR/docker"
+    cp -R "$CAKE_SOURCE_ENV_FOLDER" "$dest"
+    log_success "Cloned $CAKE_SOURCE_ENV_FOLDER → $dest"
+}
+
+# Patch the cloned database.php: rewrite host/login/password/database in $default.
+patch_cake_database_php() {
+    local file="$CAKE_CONFIG_DIR/docker/database.php"
+    if [ ! -f "$file" ]; then
+        return
+    fi
+
+    local tmp="${file}.shipyard.tmp"
+    awk -v project="$PROJECT_NAME" '
+        BEGIN { in_default = 0 }
+        /^[[:space:]]*public[[:space:]]+\$default[[:space:]]*=[[:space:]]*array[[:space:]]*\(/ {
+            in_default = 1
+            print
+            next
+        }
+        in_default {
+            if ($0 ~ /^[[:space:]]*\)[[:space:]]*;/) {
+                in_default = 0
+                print
+                next
+            }
+            if ($0 ~ /\047host\047[[:space:]]*=>/) {
+                sub(/\047host\047[[:space:]]*=>[[:space:]]*\047[^\047]*\047/, "\047host\047 => \047mysql\047", $0)
+            }
+            if ($0 ~ /\047login\047[[:space:]]*=>/) {
+                sub(/\047login\047[[:space:]]*=>[[:space:]]*\047[^\047]*\047/, "\047login\047 => \047sail\047", $0)
+            }
+            if ($0 ~ /\047password\047[[:space:]]*=>/) {
+                sub(/\047password\047[[:space:]]*=>[[:space:]]*\047[^\047]*\047/, "\047password\047 => \047password\047", $0)
+            }
+            if ($0 ~ /\047database\047[[:space:]]*=>/) {
+                sub(/\047database\047[[:space:]]*=>[[:space:]]*\047[^\047]*\047/, "\047database\047 => \047" project "\047", $0)
+            }
+            print
+            next
+        }
+        { print }
+    ' "$file" > "$tmp"
+    mv "$tmp" "$file"
+    log_success "Patched $file"
+    REVIEW_FILES+=("$file")
+}
+
+# Patch the cloned email.php: rewrite host → mailpit and port → 1025 wherever
+# they appear as array keys. (Email files often have multiple transport blocks.)
+patch_cake_email_php() {
+    local file="$CAKE_CONFIG_DIR/docker/email.php"
+    if [ ! -f "$file" ]; then
+        return
+    fi
+
+    local tmp="${file}.shipyard.tmp"
+    awk '
+        {
+            if ($0 ~ /\047host\047[[:space:]]*=>/) {
+                sub(/\047host\047[[:space:]]*=>[[:space:]]*\047[^\047]*\047/, "\047host\047 => \047mailpit\047", $0)
+            }
+            if ($0 ~ /\047port\047[[:space:]]*=>/) {
+                sub(/\047port\047[[:space:]]*=>[[:space:]]*[0-9]+/, "\047port\047 => 1025", $0)
+                sub(/\047port\047[[:space:]]*=>[[:space:]]*\047[^\047]*\047/, "\047port\047 => 1025", $0)
+            }
+            print
+        }
+    ' "$file" > "$tmp"
+    mv "$tmp" "$file"
+    log_success "Patched $file"
+    REVIEW_FILES+=("$file")
+}
+
+# Patch SITE_URL define + the first 'url' => 'http(s)://...' entry per file
+# (the latter catches the Site.url in config.php). Best-effort — surfaced in
+# the review summary so the user can verify.
+patch_cake_site_url() {
+    local file="$1"
+    if [ ! -f "$file" ]; then
+        return
+    fi
+
+    local target="http://${PROJECT_NAME}.test/"
+    local tmp="${file}.shipyard.tmp"
+
+    awk -v target="$target" '
+        BEGIN { url_patched = 0 }
+        {
+            if ($0 ~ /define[[:space:]]*\([[:space:]]*\047SITE_URL\047[[:space:]]*,/) {
+                sub(/define[[:space:]]*\([[:space:]]*\047SITE_URL\047[[:space:]]*,[[:space:]]*\047[^\047]*\047[[:space:]]*\)/, "define(\047SITE_URL\047, \047" target "\047)", $0)
+            }
+            if (!url_patched && $0 ~ /\047url\047[[:space:]]*=>[[:space:]]*\047https?:\/\//) {
+                sub(/\047url\047[[:space:]]*=>[[:space:]]*\047[^\047]*\047/, "\047url\047 => \047" target "\047", $0)
+                url_patched = 1
+            }
+            print
+        }
+    ' "$file" > "$tmp"
+    mv "$tmp" "$file"
+    log_success "Patched $file"
+    REVIEW_FILES+=("$file")
+}
+
+# Generate (or prompt overwrite) of app/Config/local.php — the per-machine
+# selector that points CakePHP at the docker env folder.
+write_cake_local_php() {
+    local file="$CAKE_CONFIG_DIR/local.php"
+    local content
+    content="<?php
+Configure::write('env', 'docker');
+
+define('SITE_URL', 'http://${PROJECT_NAME}.test/');
+
+include Configure::read('env') . '/bootstrap.php';
+"
+
+    if [ -f "$file" ]; then
+        echo ""
+        log_warning "$file already exists."
+        echo -n "Overwrite with the docker selector? [y/N]: "
+        local response
+        read -r response
+        response=${response:-N}
+        if [[ ! "$response" =~ ^[Yy]$ ]]; then
+            log_info "Keeping existing $file. To switch to docker manually, set:"
+            echo -e "  ${DIM}Configure::write('env', 'docker');${NC}"
+            return
+        fi
+    fi
+
+    printf '%s' "$content" > "$file"
+    log_success "Wrote $file"
+    REVIEW_FILES+=("$file")
+}
+
+# Orchestrate the cake-2 env folder clone + patch + local.php generation.
+scaffold_cakephp_env() {
+    detect_cake_source_env
+    check_cake_docker_dest
+    clone_cake_env_folder
+    patch_cake_database_php
+    patch_cake_email_php
+    patch_cake_site_url "$CAKE_CONFIG_DIR/docker/bootstrap.php"
+    patch_cake_site_url "$CAKE_CONFIG_DIR/docker/config.php"
+    write_cake_local_php
+}
+
+# Print the review-these-files block at end of init. No-op if nothing tracked.
+print_review_summary() {
+    if [ ${#REVIEW_FILES[@]} -eq 0 ]; then
+        return
+    fi
+
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}📋 Review checklist${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${DIM}Shipyard created or patched the files below. Skim them before${NC}"
+    echo -e "${DIM}committing — auto-patches are best-effort and may need touch-ups.${NC}"
+    echo ""
+    local f
+    for f in "${REVIEW_FILES[@]}"; do
+        echo -e "  ${DIM}•${NC} $f"
+    done
+    echo ""
+}
+
+# ==============================================================================
+# PRESET WIZARD FUNCTIONS
+# ==============================================================================
+
+prompt_preset() {
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🧰 Project Preset${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${DIM}What kind of project is this?${NC}"
+    echo -e "  ${CYAN}[1]${NC} Laravel Sail ${DIM}(existing docker-compose.yml)${NC}"
+    echo -e "  ${CYAN}[2]${NC} Laravel Legacy ${DIM}(pre-Sail Laravel 6/7/8 on PHP 7.x)${NC}"
+    echo -e "  ${CYAN}[3]${NC} CakePHP 2 ${DIM}(PHP 5.6/7.x with per-env config folders)${NC}"
+    echo ""
+
+    while true; do
+        echo -n "Select preset [1]: "
+        read -r selection
+        selection=${selection:-1}
+
+        case $selection in
+            1) PRESET="sail"; log_success "Selected: Laravel Sail"; break ;;
+            2) PRESET="laravel-legacy"; log_success "Selected: Laravel Legacy"; break ;;
+            3) PRESET="cakephp-2"; log_success "Selected: CakePHP 2"; break ;;
+            *) echo -e "${YELLOW}Invalid selection. Choose 1, 2, or 3.${NC}" ;;
+        esac
+    done
+}
+
+prompt_php_version() {
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🐘 PHP Version${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+
+    local versions default_version
+    if [ "$PRESET" = "laravel-legacy" ]; then
+        versions=("7.2" "7.3" "7.4")
+        default_version="7.4"
+    else
+        versions=("5.6" "7.0" "7.1" "7.2" "7.3" "7.4")
+        default_version="7.4"
+    fi
+
+    echo -e "${DIM}Choose the PHP version for the docker stack:${NC}"
+    local i=1
+    local default_index=1
+    for v in "${versions[@]}"; do
+        if [ "$v" = "$default_version" ]; then
+            echo -e "  ${CYAN}[$i]${NC} PHP $v ${DIM}(default)${NC}"
+            default_index=$i
+        else
+            echo -e "  ${CYAN}[$i]${NC} PHP $v"
+        fi
+        i=$((i + 1))
+    done
+    echo ""
+
+    while true; do
+        echo -n "Select PHP version [$default_index]: "
+        read -r selection
+        selection=${selection:-$default_index}
+
+        if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "${#versions[@]}" ]; then
+            SELECTED_PHP_VERSION="${versions[$((selection - 1))]}"
+            log_success "Selected: PHP $SELECTED_PHP_VERSION"
+            break
+        else
+            echo -e "${YELLOW}Invalid selection. Choose a number between 1 and ${#versions[@]}.${NC}"
+        fi
+    done
+}
+
+prompt_mysql_version() {
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🐬 MySQL Version${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+
+    # PHP ≤ 7.2 → default 5.7; newer → 8.0
+    local default_version="8.0"
+    case "$SELECTED_PHP_VERSION" in
+        5.6|7.0|7.1|7.2) default_version="5.7" ;;
+    esac
+
+    local versions=("5.7" "8.0" "8.4")
+
+    echo -e "${DIM}Choose the MySQL version for the docker stack:${NC}"
+    local i=1
+    local default_index=1
+    for v in "${versions[@]}"; do
+        if [ "$v" = "$default_version" ]; then
+            echo -e "  ${CYAN}[$i]${NC} MySQL $v ${DIM}(default for PHP $SELECTED_PHP_VERSION)${NC}"
+            default_index=$i
+        else
+            echo -e "  ${CYAN}[$i]${NC} MySQL $v"
+        fi
+        i=$((i + 1))
+    done
+    echo ""
+
+    while true; do
+        echo -n "Select MySQL version [$default_index]: "
+        read -r selection
+        selection=${selection:-$default_index}
+
+        if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "${#versions[@]}" ]; then
+            SELECTED_MYSQL_VERSION="${versions[$((selection - 1))]}"
+            log_success "Selected: MySQL $SELECTED_MYSQL_VERSION"
+            break
+        else
+            echo -e "${YELLOW}Invalid selection. Choose a number between 1 and ${#versions[@]}.${NC}"
+        fi
+    done
+}
+
+prompt_node_version() {
+    # If the project already pins a node version, respect it.
+    if [ -f ".nvmrc" ]; then
+        SELECTED_NODE_VERSION=$(tr -d ' \t\r\n' < .nvmrc)
+        if [ -n "$SELECTED_NODE_VERSION" ]; then
+            log_success "Found .nvmrc — using Node version: $SELECTED_NODE_VERSION"
+            return
+        fi
+        log_warning ".nvmrc exists but is empty — falling through to prompt."
+    fi
+
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🟩 Node Version${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${DIM}No .nvmrc found. Pin the Node version for the docker stack.${NC}"
+    echo -e "${DIM}Accepts anything nvm install accepts: 18, 20, 18.17.0, lts/*, …${NC}"
+    echo ""
+
+    while true; do
+        echo -n "Node version [20]: "
+        read -r input
+        SELECTED_NODE_VERSION=${input:-20}
+        if [ -n "$SELECTED_NODE_VERSION" ]; then
+            log_success "Selected: Node $SELECTED_NODE_VERSION (will be written to .nvmrc)"
+            break
+        fi
+    done
+}
+
+prompt_optional_services() {
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}🧩 Optional Services${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${DIM}Base stack always includes php, nginx, mysql, redis, mailpit.${NC}"
+    echo -e "${DIM}Add a search engine only if your project actually uses one.${NC}"
+    echo ""
+
+    local response
+
+    echo -n "Include Meilisearch? [y/N]: "
+    read -r response
+    response=${response:-N}
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+        OPTIONAL_SERVICES="${OPTIONAL_SERVICES} meilisearch"
+        echo -n "  Meilisearch image tag [latest]: "
+        read -r tag
+        MEILISEARCH_VERSION="${tag:-latest}"
+        log_success "Meilisearch enabled (getmeili/meilisearch:$MEILISEARCH_VERSION)"
+    fi
+
+    echo -n "Include Elasticsearch? [y/N]: "
+    read -r response
+    response=${response:-N}
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+        OPTIONAL_SERVICES="${OPTIONAL_SERVICES} elasticsearch"
+        echo -n "  Elasticsearch image tag [7.17.28]: "
+        read -r tag
+        ELASTICSEARCH_VERSION="${tag:-7.17.28}"
+        log_success "Elasticsearch enabled (docker.elastic.co/elasticsearch/elasticsearch:$ELASTICSEARCH_VERSION)"
+    fi
+
+    # Trim leading whitespace
+    OPTIONAL_SERVICES="${OPTIONAL_SERVICES# }"
+
+    if [ -z "$OPTIONAL_SERVICES" ]; then
+        echo ""
+        log_info "No optional services selected — base stack only"
+    fi
 }
 
 # ==============================================================================
@@ -1948,24 +3025,43 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     fi
     log_success "Project not yet registered"
 
-    # Step 4: Check if .env file already exists (fail fast!)
-    check_env_already_initialized
-    log_success ".env file does not exist yet"
+    # Step 4: Choose preset (first user input — drives branching below)
+    prompt_preset
 
-    # Step 5: Validate Docker is installed and running
+    # Step 5: For legacy presets, collect stack details now so they're available
+    # before scaffolding and port assignment
+    if [ "$PRESET" != "sail" ]; then
+        prompt_php_version
+        prompt_mysql_version
+        prompt_optional_services
+        prompt_node_version
+    fi
+
+    # Step 6: Check if .env file already exists (sail/laravel-legacy only;
+    # cakephp-2 uses per-env config folders and is handled separately in Step 4)
+    if [ "$PRESET" = "sail" ] || [ "$PRESET" = "laravel-legacy" ]; then
+        check_env_already_initialized
+        log_success ".env file does not exist yet"
+    fi
+
+    # Step 7: Validate Docker is installed and running
     validate_docker
 
-    # Step 6: Check for Docker network issues
+    # Step 8: Check for Docker network issues
     check_docker_networks
 
-    # Step 7: Validate docker-compose.yml exists
-    validate_docker_compose
+    # Step 9: Validate docker-compose.yml exists (sail only — legacy presets
+    # scaffold the compose file in Step 3)
+    if [ "$PRESET" = "sail" ]; then
+        validate_docker_compose
+    fi
 
-    # Step 8: Collect all user input upfront
+    # Step 10: Collect all user input upfront
     collect_user_input
 
     # Step 9: Write auth.json (when needed) and run composer install
     write_composer_auth_json
+    write_npmrc
     run_composer_install
 
     # Step 10: Validate/create .env file
@@ -1991,16 +3087,26 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         log_success "Registry is empty (first project)"
     fi
 
-    # Step 14: Extract port variables from docker-compose.yml
+    # Step 14: Build port variable list. Sail reads them from the existing
+    # docker-compose.yml; legacy presets don't have a compose file yet, so the
+    # list is computed from the chosen preset + opted-in optional services.
     local port_vars_output
     local port_vars_array=()
-    port_vars_output=$(extract_port_vars)
+    if [ "$PRESET" = "sail" ]; then
+        port_vars_output=$(extract_port_vars)
+    else
+        port_vars_output=$(compute_legacy_port_vars)
+    fi
     while IFS= read -r port_var; do
         [ -z "$port_var" ] && continue
         port_vars_array+=("$port_var")
     done <<< "$port_vars_output"
     local num_port_vars=${#port_vars_array[@]}
-    log_success "Extracted $num_port_vars port variable(s) from docker-compose.yml"
+    if [ "$PRESET" = "sail" ]; then
+        log_success "Extracted $num_port_vars port variable(s) from docker-compose.yml"
+    else
+        log_success "Computed $num_port_vars port variable(s) for preset '$PRESET'"
+    fi
 
     echo ""
     log_info "Assigning ports:"
@@ -2028,6 +3134,13 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
     done
 
     echo ""
+
+    # Step 15.5: For legacy presets, scaffold the docker stack now that ports
+    # are assigned. Sail keeps its existing compose file untouched.
+    if [ "$PRESET" != "sail" ]; then
+        scaffold_stack "$PRESET"
+        echo ""
+    fi
 
     # Step 16: Domain registration (non-interactive)
     if [ "$REGISTER_DOMAIN" = true ]; then
@@ -2090,29 +3203,44 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         echo "=========================================="
         echo ""
 
-        log_info "Step 1/2: Starting Docker containers (vendor/bin/sail up -d)..."
-        ./vendor/bin/sail up -d
+        if [ "$PRESET" = "sail" ]; then
+            log_info "Step 1/2: Starting Docker containers (vendor/bin/sail up -d)..."
+            ./vendor/bin/sail up -d
 
-        if [ $? -ne 0 ]; then
+            if [ $? -ne 0 ]; then
+                echo ""
+                log_error "Failed to start Docker containers."
+                echo "You may need to run this manually:"
+                echo "  ./vendor/bin/sail up -d"
+                exit 9
+            fi
+            log_success "Docker containers started"
+
             echo ""
-            log_error "Failed to start Docker containers."
-            echo "You may need to run this manually:"
-            echo "  ./vendor/bin/sail up -d"
-            exit 9
-        fi
-        log_success "Docker containers started"
+            log_info "Step 2/2: Running Composer setup (vendor/bin/sail composer setup)..."
+            ./vendor/bin/sail composer setup
 
-        echo ""
-        log_info "Step 2/2: Running Composer setup (vendor/bin/sail composer setup)..."
-        ./vendor/bin/sail composer setup
+            if [ $? -ne 0 ]; then
+                echo ""
+                log_error "Composer setup failed. You may need to run this manually:"
+                echo "  ./vendor/bin/sail composer setup"
+                exit 9
+            fi
+            log_success "Composer setup completed"
+        else
+            # Legacy presets: no Sail wrapper, composer install already ran.
+            log_info "Starting Docker containers (docker compose up -d)..."
+            docker compose up -d
 
-        if [ $? -ne 0 ]; then
-            echo ""
-            log_error "Composer setup failed. You may need to run this manually:"
-            echo "  ./vendor/bin/sail composer setup"
-            exit 9
+            if [ $? -ne 0 ]; then
+                echo ""
+                log_error "Failed to start Docker containers."
+                echo "You may need to run this manually:"
+                echo "  docker compose up -d"
+                exit 9
+            fi
+            log_success "Docker containers started"
         fi
-        log_success "Composer setup completed"
 
         echo ""
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -2148,9 +3276,15 @@ To re-assign ports, manually remove the [$PROJECT_NAME] section from the registr
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
         echo "To complete setup manually, run:"
-        echo -e "  ${DIM}1.${NC} ./vendor/bin/sail up -d"
-        echo -e "  ${DIM}2.${NC} ./vendor/bin/sail composer setup"
+        if [ "$PRESET" = "sail" ]; then
+            echo -e "  ${DIM}1.${NC} ./vendor/bin/sail up -d"
+            echo -e "  ${DIM}2.${NC} ./vendor/bin/sail composer setup"
+        else
+            echo -e "  ${DIM}•${NC} docker compose up -d"
+        fi
     fi
+
+    print_review_summary
 }
 
 # ==============================================================================

@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-05-14
+
+### Added
+- New `laravel-legacy` preset for pre-Sail Laravel projects (Laravel 6/7/8 on PHP 7.2/7.3/7.4) — scaffolds a full php-fpm + nginx + mysql + redis + mailpit stack with no existing `docker-compose.yml` required
+- New `cakephp-2` preset for legacy CakePHP 2 projects (PHP 5.6/7.0/7.1/7.2/7.3/7.4) — scaffolds a php-fpm + nginx + mysql + mailpit stack (no redis by default — opt-in via meilisearch/elasticsearch only) and clones the project's own `app/Config/dev/` (or first env-shaped folder) into `app/Config/docker/`, patching DB host/credentials, mail host/port, and `SITE_URL` / `Site.url` in `bootstrap.php` + `config.php`, then generates a per-machine `local.php` selector
+- Wizard now prompts for preset, PHP version, MySQL version, and optional services (Meilisearch / Elasticsearch) — only chosen services are written into the generated `docker-compose.yml` and only their ports get assigned
+- Optional service image tags are prompted at init time so older versions can be kept on legacy projects
+- Stack templates fetched at scaffold time from `https://raw.githubusercontent.com/wotzebra/shipyard/v$VERSION/templates/...`; override the ref via `SHIPYARD_TEMPLATE_REF` env var
+- Composer install now branches per preset: Sail keeps the matched `laravelsail/phpXY-composer` image; legacy presets use the official `composer:1` / `composer:2` image, auto-detected from `composer.lock` (`plugin-api-version` → 2, `hash` → 1) with PHP-version heuristic as fallback
+- Composer install for `cakephp-2` resolves `composer.json` at the repo root or under `app/`, and runs in the matching container working directory
+- Cake-2 projects without `composer.json` skip composer install + auth-json writing entirely
+- Review checklist printed at end of `init` listing every file Shipyard created or patched so the user can sanity-check before committing
+- New exit codes: `EXIT_TEMPLATE_FETCH_FAILED=13`, `EXIT_CAKE_LAYOUT_NOT_FOUND=14`
+- `log_warning` helper (this function was already being called by `detect_php_version` but was never defined — latent bug)
+- `TESTING.md` with recipes for exercising each preset against fixtures or real projects
+
+### Changed
+- `init` wizard now starts with a preset prompt; the `.env`-must-not-exist check applies only to `sail` / `laravel-legacy`; the `docker-compose.yml`-must-exist check applies only to `sail`
+- `validate_env_file` creates an empty `.env` for legacy presets when neither `.env` nor `.env.example` is present
+- Title banner and `--help` now describe Shipyard generically as a "PHP project setup" tool
+
 ## [0.4.0] - 2026-04-17
 
 ### Added
