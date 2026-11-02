@@ -484,7 +484,7 @@ check_docker_networks() {
 
     # Count total bridge networks (excluding default bridge)
     local total_networks
-    total_networks=$(docker network ls --filter "driver=bridge" --format "{{.Name}}" 2>/dev/null | grep -v "^bridge$" | wc -l | tr -d ' ')
+    total_networks=$(docker network ls --filter "driver=bridge" --format "{{.Name}}" 2>/dev/null | { grep -v "^bridge$" || true; } | wc -l | tr -d ' ')
 
     # If there are many networks, check if cleanup might help
     if [ "$total_networks" -gt 20 ]; then
@@ -506,11 +506,11 @@ check_docker_networks() {
             echo ""
             echo "Cleaning up unused Docker networks..."
             local before_count
-            before_count=$(docker network ls --filter "driver=bridge" --format "{{.Name}}" 2>/dev/null | grep -v "^bridge$" | wc -l | tr -d ' ')
+            before_count=$(docker network ls --filter "driver=bridge" --format "{{.Name}}" 2>/dev/null | { grep -v "^bridge$" || true; } | wc -l | tr -d ' ')
 
             if docker network prune -f >/dev/null 2>&1; then
                 local after_count
-                after_count=$(docker network ls --filter "driver=bridge" --format "{{.Name}}" 2>/dev/null | grep -v "^bridge$" | wc -l | tr -d ' ')
+                after_count=$(docker network ls --filter "driver=bridge" --format "{{.Name}}" 2>/dev/null | { grep -v "^bridge$" || true; } | wc -l | tr -d ' ')
                 local removed=$((before_count - after_count))
                 log_success "Removed $removed unused network(s)"
             else
@@ -1709,7 +1709,8 @@ collect_user_input() {
     fi
 
     # 2. Detect available local dev tools (Valet/Herd)
-    detect_local_dev_tools
+    # Returns 1 when neither is installed; that must not abort the script under `set -e`.
+    detect_local_dev_tools || true
 
     # 3. Ask about domain registration
     if [ "$VALET_AVAILABLE" = true ] || [ "$HERD_AVAILABLE" = true ]; then
